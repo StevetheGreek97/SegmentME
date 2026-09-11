@@ -22,7 +22,8 @@ SegmentME consists of the following key components:
 - Navigate between images using the **Previous Image** and **Next Image** buttons in the sidebar or the **Left (⬅) and Right (➡) arrow keys**.
 
 ### 2. Opening a Project from the File Manager (Linux)
-- Run `install-desktop.sh` once. It sits next to the SegmentME executable (or in the source folder, where `install.sh` runs it for you). It adds SegmentME to the applications menu and registers `.SEproj` files, so double-clicking a project file opens it directly.
+- Installed from the `.deb` package? Nothing to do: SegmentME is in the applications menu and `.SEproj` files already open with it.
+- Using the extracted archive or a source checkout: run `install-desktop.sh` once. It sits next to the SegmentME executable (or in the source folder, where `install.sh` runs it for you). It adds SegmentME to the applications menu and registers `.SEproj` files, so double-clicking a project file opens it directly.
 - Run `install-desktop.sh --uninstall` to undo this.
 - On every platform you can also start SegmentME with the path of a `.SEproj` file as its only argument.
 
