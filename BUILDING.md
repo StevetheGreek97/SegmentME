@@ -39,6 +39,12 @@ Each archive contains a `models/` folder beside the executable (beside the
 `.app` on macOS) holding `sam2_hiera_tiny.pt` and a README. The version
 number comes from `version.py`.
 
+The Linux archive also contains `install-desktop.sh`. Running it once adds
+SegmentME to the applications menu and registers the `.SEproj` file type
+with SegmentME as its handler, so double-clicking a project file opens it
+(per user, no root; `--uninstall` reverses it). The same script works in a
+source checkout, where `install.sh` runs it automatically.
+
 Useful flags: `--no-archive` leaves the folder in `dist/` without zipping it;
 `--skip-env` uses the interpreter running the script instead of creating
 `build_env/` (it must already have every dependency plus
@@ -114,6 +120,9 @@ Measured on Linux: the CPU build is 1.2 GB unpacked without models
    Training Monitor must show ultralytics' log lines, not an error about
    `yolo` not being found.
 4. **Actions → Run Inference** with the trained `best.pt`.
+5. Linux: run `./install-desktop.sh`, then double-click a `.SEproj` file in
+   the file manager – the project must open directly, with the SegmentME
+   icon shown on the file.
 
 ## Code signing (not automated)
 

@@ -29,12 +29,12 @@ echo "Python $PY_VER detected."
 echo ""
 
 # Create virtual environment
-echo "[1/5] Creating virtual environment..."
+echo "[1/6] Creating virtual environment..."
 python3 -m venv .venv
 source .venv/bin/activate
 
 # PyTorch CPU-only (macOS: the default wheel, which also covers Apple Metal)
-echo "[2/5] Installing PyTorch (CPU)..."
+echo "[2/6] Installing PyTorch (CPU)..."
 if [ "$(uname)" = "Darwin" ]; then
     pip install --quiet --no-cache-dir torch torchvision
 else
@@ -44,11 +44,11 @@ else
 fi
 
 # Main requirements
-echo "[3/5] Installing dependencies..."
+echo "[3/6] Installing dependencies..."
 pip install --quiet --no-cache-dir -r requirements.txt
 
 # SAM2, SAM3 and DEXTR (not on PyPI; installed from GitHub archives, no git needed)
-echo "[4/5] Installing SAM2, SAM3 and DEXTR..."
+echo "[4/6] Installing SAM2, SAM3 and DEXTR..."
 SAM2_BUILD_CUDA=0 pip install --quiet --no-cache-dir \
     "https://github.com/facebookresearch/sam2/archive/refs/heads/main.zip"
 pip install --quiet --no-cache-dir \
@@ -63,7 +63,7 @@ rm -rf "$DEXTR_TMP"
 # Model checkpoints live in models/ next to the app (see services/model_store.py).
 # Only SAM2 Tiny is fetched here; everything else can be downloaded from
 # Settings -> Models inside the app.
-echo "[5/5] Downloading the default SAM2 Tiny model..."
+echo "[5/6] Downloading the default SAM2 Tiny model..."
 mkdir -p models
 if [ ! -f "models/sam2_hiera_tiny.pt" ]; then
     echo "  Downloading sam2_hiera_tiny.pt (~155 MB)..."
@@ -90,10 +90,19 @@ else
     echo "  sam3.pt already present, skipping download."
 fi
 
+# Applications-menu entry and .SEproj file association (per user, no root).
+if [ "$(uname)" = "Linux" ]; then
+    echo "[6/6] Registering SegmentME with the desktop (menu entry, .SEproj files)..."
+    ./install-desktop.sh
+fi
+
 echo ""
 echo "========================================"
 echo "   Installation complete!"
 echo "   Run ./run.sh to start SegmentME."
+if [ "$(uname)" = "Linux" ]; then
+    echo "   Or find it in the applications menu / double-click a .SEproj file."
+fi
 echo "   Other models (SAM2 Small/Large, SAM2.1, DEXTR):"
 echo "   Settings -> Models inside the app."
 echo "========================================"

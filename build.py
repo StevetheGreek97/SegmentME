@@ -172,6 +172,14 @@ def models_readme():
     return "\n".join(lines)
 
 
+def add_linux_desktop_script(out):
+    """Ship install-desktop.sh next to the executable: it registers the
+    applications-menu entry and the .SEproj file type for the current user."""
+    target = out / "install-desktop.sh"
+    shutil.copy2(ROOT / "install-desktop.sh", target)
+    target.chmod(target.stat().st_mode | 0o111)
+
+
 # ----------------------------------------------------------------- step 4
 def archive(out, flavor):
     base = ROOT / "dist" / f"SegmentME-{__version__}-{OS_TAG}-{flavor}"
@@ -200,6 +208,8 @@ def main():
     run_pyinstaller(python, args.flavor)
     out = output_dir(args.flavor)
     add_bundled_models(out)
+    if SYSTEM == "Linux":
+        add_linux_desktop_script(out)
 
     if args.no_archive:
         print(f"\nDone: {out}")

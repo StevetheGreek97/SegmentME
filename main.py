@@ -30,13 +30,20 @@ from services.recent_projects import save_recent_project, initialize_project
 from services.logger import get_logger
 
 from pathlib import Path
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication, QMessageBox
 
 logger = get_logger(__name__)
 
 app = QApplication(sys.argv)
+# Lets the desktop match our windows to segmentme.desktop (registered by
+# install-desktop.sh on Linux): the application name becomes the X11
+# WM_CLASS, the desktop file name the Wayland app id.
+app.setApplicationName("SegmentME")
+QApplication.setDesktopFileName("segmentme")
 
-if len(sys.argv) > 1 and sys.argv[1].endswith(".SEproj"):
+# Started with a project file (double-click in a file manager, or given
+# on the command line)? Open it directly instead of the startup dialog.
+if len(sys.argv) > 1 and sys.argv[1].lower().endswith(".seproj"):
     seproj_file = Path(sys.argv[1]).resolve()
     project_path = seproj_file.parent
     db_path = project_path / ".segmentme" / "masks.db"
@@ -49,6 +56,10 @@ if len(sys.argv) > 1 and sys.argv[1].endswith(".SEproj"):
         sys.exit(app.exec())
     else:
         logger.error("Cannot open %s: expected project database at %s", seproj_file, db_path)
+        QMessageBox.critical(
+            None, "SegmentME",
+            f"Cannot open {seproj_file.name}:\nno project database found at\n{db_path}",
+        )
         sys.exit(1)
 else:
     dialog = ProjectStartupDialog()
