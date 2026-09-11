@@ -17,4 +17,4 @@ build_env/
 build_cache/
 vendor/
 docker_projects
-.pyc
+*.pyc
