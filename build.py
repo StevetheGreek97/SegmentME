@@ -7,6 +7,12 @@
                                      # script (must already have every runtime
                                      # dependency + requirements-build.txt)
     python build.py --no-archive     # leave the folder in dist/, don't zip it
+    python build.py --deb            # also build a Debian package (Linux)
+    python build.py --skip-build --deb --no-archive
+                                     # package the dist/ folder of an earlier
+                                     # run as a .deb without rebuilding
+    docker/build.sh --deb            # the same, inside an Ubuntu 22.04 container,
+                                     # for a bundle that runs on older distros
 
 Steps
   1. Create build_env/<flavor>/ (a venv) with PyTorch of the chosen flavour,
@@ -16,6 +22,9 @@ Steps
   3. Copy SAM2 Tiny -- the only model that ships -- into <output>/models/
      next to the executable, with a README listing the other filenames.
   4. Archive the result as dist/SegmentME-<version>-<os>-<flavor>.<zip|tar.gz>.
+  5. With --deb (Linux): wrap the same folder as dist/segmentme_<version>_<arch>.deb
+     -- the app in /opt/segmentme, a launcher in /usr/bin, and the menu
+     entry, .SEproj file type and icons installed system-wide.
 
 PyInstaller does not cross-compile: run this once per OS you want to ship.
 Needs Python 3.10-3.12 and an internet connection; git is not required.
@@ -23,6 +32,7 @@ Needs Python 3.10-3.12 and an internet connection; git is not required.
 import argparse
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -62,8 +72,7 @@ def venv_python(env_dir):
     return env_dir / ("Scripts/python.exe" if SYSTEM == "Windows" else "bin/python")
 
 
-def create_env(flavor):
-    env_dir = ROOT / "build_env" / flavor
+def create_env(flavor, env_dir):
     python = venv_python(env_dir)
     if not python.exists():
         run([sys.executable, "-m", "venv", env_dir])
@@ -193,28 +202,219 @@ def archive(out, flavor):
     return Path(shutil.make_archive(str(base), fmt, root_dir=out.parent, base_dir=out.name))
 
 
+# ----------------------------------------------------------------- step 5
+DEB_MAINTAINER = "StevetheGreek97 <mavrianosstelios@icloud.com>"
+DEB_HOMEPAGE = "https://github.com/StevetheGreek97/AquaVision"
+# Needed for dpkg's file triggers, which rebuild the desktop, MIME and icon
+# caches after installation (so the package needs no maintainer scripts).
+DEB_EXTRA_DEPENDS = ("desktop-file-utils", "shared-mime-info", "hicolor-icon-theme")
+
+
+def existing_output(flavor):
+    """The dist/ folder a previous run left behind (for --skip-build)."""
+    name = app_name(flavor)
+    out = ROOT / "dist" / (f"{name}-macos" if SYSTEM == "Darwin" else name)
+    if not out.exists():
+        sys.exit(f"{out} not found: run build.py without --skip-build first.")
+    return out
+
+
+def glibc_floor(out, exe):
+    """Lowest glibc the bundle runs on: the highest GLIBC_x.y symbol version
+    any bundled binary references. PyInstaller copies system libraries such
+    as libpython, libglib and libstdc++ from the build host, so this is the
+    host distribution's generation, not torch's manylinux baseline -- build
+    on the oldest release you want to support. None if objdump is missing."""
+    if shutil.which("objdump") is None:
+        return None
+    pattern = re.compile(r"GLIBC_(\d+)\.(\d+)")
+    newest = (0, 0)
+    for elf in [out / exe, *(p for p in out.rglob("*.so*") if not p.is_symlink())]:
+        dump = subprocess.run(["objdump", "-T", str(elf)], capture_output=True, text=True)
+        for major, minor in pattern.findall(dump.stdout):
+            newest = max(newest, (int(major), int(minor)))
+    return "%d.%d" % newest if newest > (0, 0) else None
+
+
+def system_depends(out, exe):
+    """Debian packages owning the shared libraries the bundle loads from the
+    system: whatever ldd resolves to a path outside the bundle (PyInstaller
+    ships everything else). Computed on the build host, so the package names
+    match the distribution the bundle was linked against."""
+    bundled = {p.name for p in out.rglob("*.so*")}
+    elfs = [out / exe] + [p for p in out.rglob("*.so*") if not p.is_symlink()]
+    paths = set()
+    for elf in elfs:
+        ldd = subprocess.run(["ldd", str(elf)], capture_output=True, text=True)
+        for line in ldd.stdout.splitlines():
+            name, arrow, rest = line.strip().partition(" => ")
+            path = rest.split(" (")[0].strip()
+            if arrow and path.startswith("/") and not path.startswith(str(out)) \
+                    and name not in bundled:
+                # dpkg registers the file under /lib on releases before the
+                # /usr merge (Ubuntu 22.04) and under /usr/lib after it, so
+                # ask about both spellings; the miss only prints to stderr.
+                paths.update({path, os.path.realpath(path)})
+    query = subprocess.run(["dpkg", "-S", *sorted(paths)], capture_output=True, text=True)
+    packages = {line.split(":")[0] for line in query.stdout.splitlines() if ": " in line}
+    floor = glibc_floor(out, exe)
+    if floor is None:  # no objdump: fall back to the build host's glibc
+        host = subprocess.run(["dpkg-query", "-W", "-f=${Version}", "libc6"],
+                              capture_output=True, text=True).stdout.strip()
+        floor = host.split(":")[-1].split("-")[0] or None
+    packages.discard("libc6")  # always needed, always versioned
+    if floor:
+        packages.add(f"libc6 (>= {floor})")
+        print(f"glibc floor: {floor} -- the package refuses to install on older "
+              "distributions; build on an older one to lower it (see BUILDING.md)")
+    else:
+        packages.add("libc6")
+        print("warning: could not determine the glibc floor; libc6 left unversioned")
+    return sorted(packages | set(DEB_EXTRA_DEPENDS))
+
+
+def write_icons(python, source, hicolor):
+    """desktop.png (1024 px) scaled to the usual hicolor sizes, as both the
+    application icon and the .SEproj file icon. Runs in the build venv,
+    which has Pillow (a torchvision dependency)."""
+    script = """
+import sys
+from pathlib import Path
+from PIL import Image
+img = Image.open(sys.argv[1]).convert("RGBA")
+for size in (48, 64, 128, 256, 512):
+    scaled = img.resize((size, size), Image.Resampling.LANCZOS)
+    for context, name in (("apps", "segmentme"),
+                          ("mimetypes", "application-x-segmentme-project")):
+        target = Path(sys.argv[2]) / f"{size}x{size}" / context / f"{name}.png"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        scaled.save(target)
+"""
+    subprocess.run([str(python), "-c", script, str(source), str(hicolor)], check=True)
+
+
+def make_deb(out, flavor, python):
+    """Debian package around the PyInstaller folder: /opt/segmentme holds the
+    app (models/ included), /usr/bin/segmentme launches it, and the desktop
+    entry, MIME type and icons go to /usr/share so every user gets the menu
+    entry and .SEproj association without running install-desktop.sh."""
+    if SYSTEM != "Linux" or shutil.which("dpkg-deb") is None:
+        sys.exit("--deb needs dpkg-deb, i.e. a Debian-based Linux build host.")
+    package = "segmentme" + ("-cuda" if flavor == "cuda" else "")
+    other = "segmentme-cuda" if flavor == "cpu" else "segmentme"  # same paths: never both
+    exe = app_name(flavor)
+    arch = subprocess.check_output(["dpkg", "--print-architecture"], text=True).strip()
+
+    root = ROOT / "build" / f"deb-{flavor}"
+    shutil.rmtree(root, ignore_errors=True)
+    opt = root / "opt" / "segmentme"
+    print(f"Staging {out} as /opt/segmentme ...", flush=True)
+    shutil.copytree(out, opt, symlinks=True, ignore=shutil.ignore_patterns("install-desktop.sh"))
+
+    usr = root / "usr"
+    launcher = usr / "bin" / "segmentme"
+    launcher.parent.mkdir(parents=True)
+    launcher.write_text(f'#!/bin/sh\nexec /opt/segmentme/{exe} "$@"\n', encoding="utf-8")
+    launcher.chmod(0o755)
+
+    linux_res = ROOT / "resources" / "linux"
+    apps = usr / "share" / "applications"
+    apps.mkdir(parents=True)
+    template = (linux_res / "segmentme.desktop").read_text(encoding="utf-8")
+    (apps / "segmentme.desktop").write_text(
+        template.replace("@EXEC@", f"/opt/segmentme/{exe}").replace("@ICON@", "segmentme"),
+        encoding="utf-8")
+    mime = usr / "share" / "mime" / "packages"
+    mime.mkdir(parents=True)
+    shutil.copy2(linux_res / "segmentme.xml", mime / "segmentme.xml")
+    write_icons(python, ROOT / "resources" / "icons" / "desktop.png", usr / "share" / "icons" / "hicolor")
+    doc = usr / "share" / "doc" / package
+    doc.mkdir(parents=True)
+    shutil.copy2(ROOT / "LICENSE", doc / "copyright")
+
+    # Debian convention (and dpkg's expectation): 0755 directories and
+    # executables, 0644 everything else -- not whatever the umask left.
+    for path in (root, *root.rglob("*")):
+        if path.is_symlink():
+            continue
+        if path.is_dir():
+            path.chmod(0o755)
+        else:
+            path.chmod(0o755 if path.stat().st_mode & 0o111 else 0o644)
+
+    installed_kb = sum(p.stat().st_size for p in root.rglob("*")
+                       if p.is_file() and not p.is_symlink()) // 1024
+    depends = system_depends(out, exe)
+    flavor_note = ("CPU-only build." if flavor == "cpu"
+                   else "CUDA build: bundles the CUDA runtime for NVIDIA GPUs.")
+    control = "\n".join([
+        f"Package: {package}",
+        f"Version: {__version__}",
+        "Section: graphics",
+        "Priority: optional",
+        f"Architecture: {arch}",
+        f"Maintainer: {DEB_MAINTAINER}",
+        f"Installed-Size: {installed_kb}",
+        f"Depends: {', '.join(depends)}",
+        f"Conflicts: {other}",
+        f"Replaces: {other}",
+        f"Homepage: {DEB_HOMEPAGE}",
+        "Description: Image segmentation annotation tool",
+        " SegmentME annotates images with segmentation masks -- by hand or with",
+        " AI assistance (SAM2, SAM3, DEXTR) -- exports YOLO datasets and trains",
+        " Ultralytics YOLO segmentation models. Opens .SEproj project files.",
+        f" {flavor_note}",
+        "",
+    ])
+    (root / "DEBIAN").mkdir()
+    (root / "DEBIAN" / "control").write_text(control, encoding="utf-8")
+    print("Depends:", ", ".join(depends))
+
+    deb = ROOT / "dist" / f"{package}_{__version__}_{arch}.deb"
+    deb.unlink(missing_ok=True)
+    # gzip: every dpkg understands it and it is far quicker than xz on 1.4 GB.
+    run(["dpkg-deb", "--build", "--root-owner-group", "-Zgzip", root, deb])
+    shutil.rmtree(root, ignore_errors=True)
+    return deb
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--flavor", choices=("cpu", "cuda"), default="cpu")
     parser.add_argument("--skip-env", action="store_true",
                         help="use this interpreter instead of creating build_env/<flavor>")
     parser.add_argument("--no-archive", action="store_true", help="don't zip/tar the result")
+    parser.add_argument("--deb", action="store_true",
+                        help="also build a Debian package (Linux hosts with dpkg-deb)")
+    parser.add_argument("--skip-build", action="store_true",
+                        help="reuse dist/ from a previous run instead of rebuilding "
+                             "(e.g. --skip-build --deb --no-archive to package it)")
+    parser.add_argument("--env-dir", type=Path,
+                        help="where the build venv lives (default: build_env/<flavor>); "
+                             "container builds use their own so they don't clobber the host's")
     args = parser.parse_args()
+    env_dir = (args.env_dir or ROOT / "build_env" / args.flavor).resolve()
 
     if SYSTEM == "Darwin" and args.flavor == "cuda":
         sys.exit("CUDA builds are not possible on macOS; use --flavor cpu.")
 
-    python = Path(sys.executable) if args.skip_env else create_env(args.flavor)
-    run_pyinstaller(python, args.flavor)
-    out = output_dir(args.flavor)
-    add_bundled_models(out)
-    if SYSTEM == "Linux":
-        add_linux_desktop_script(out)
-
-    if args.no_archive:
-        print(f"\nDone: {out}")
+    if args.skip_build:
+        out = existing_output(args.flavor)
+        env_python = venv_python(env_dir)
+        python = env_python if env_python.exists() and not args.skip_env else Path(sys.executable)
     else:
-        print(f"\nDone: {archive(out, args.flavor)}")
+        python = Path(sys.executable) if args.skip_env else create_env(args.flavor, env_dir)
+        run_pyinstaller(python, args.flavor)
+        out = output_dir(args.flavor)
+        add_bundled_models(out)
+        if SYSTEM == "Linux":
+            add_linux_desktop_script(out)
+
+    results = []
+    if args.deb:
+        results.append(make_deb(out, args.flavor, python))
+    results.append(out if args.no_archive else archive(out, args.flavor))
+    print("\nDone:" + "".join(f"\n  {r}" for r in results))
 
 
 if __name__ == "__main__":

@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=SegmentME
+Comment=Annotate images with segmentation masks
+Exec=@EXEC@ %f
+Icon=@ICON@
+Terminal=false
+Categories=Graphics;
+MimeType=application/x-segmentme-project;
+StartupNotify=true
+StartupWMClass=SegmentME

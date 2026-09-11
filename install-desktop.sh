@@ -62,7 +62,7 @@ fi
 # source checkout.
 if [ -x "$HERE/SegmentME" ]; then
     EXEC="\"$HERE/SegmentME\""
-    ICON_SRC="$HERE/_internal/resources/icons/desktop.png"
+    RES="$HERE/_internal/resources"
 elif [ -f "$HERE/main.py" ]; then
     PYTHON="${SEGMENTME_PYTHON:-$HERE/.venv/bin/python}"
     if [ ! -x "$PYTHON" ]; then
@@ -71,43 +71,22 @@ elif [ -f "$HERE/main.py" ]; then
         exit 1
     fi
     EXEC="\"$PYTHON\" \"$HERE/main.py\""
-    ICON_SRC="$HERE/resources/icons/desktop.png"
+    RES="$HERE/resources"
 else
     echo "ERROR: run this script from the SegmentME folder" \
          "(next to the SegmentME executable or main.py)."
     exit 1
 fi
 
+ICON_SRC="$RES/icons/desktop.png"
 mkdir -p "$(dirname "$DESKTOP_FILE")" "$(dirname "$MIME_FILE")" "$(dirname "$MIME_ICON")"
 
-cat > "$MIME_FILE" <<XML
-<?xml version="1.0" encoding="UTF-8"?>
-<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
-  <mime-type type="$MIME_TYPE">
-    <comment>SegmentME project</comment>
-    <sub-class-of type="application/json"/>
-    <glob pattern="*.SEproj"/>
-    <icon name="application-x-segmentme-project"/>
-  </mime-type>
-</mime-info>
-XML
-
-# StartupWMClass / the desktop file name match what main.py sets, so the
-# taskbar groups SegmentME's windows under this entry.
-cat > "$DESKTOP_FILE" <<DESKTOP
-[Desktop Entry]
-Type=Application
-Name=SegmentME
-Comment=Annotate images with segmentation masks
-Exec=$EXEC %f
-Icon=$ICON_SRC
-Terminal=false
-Categories=Graphics;
-MimeType=$MIME_TYPE;
-StartupNotify=true
-StartupWMClass=SegmentME
-DESKTOP
-
+# The MIME definition and the desktop entry template are shared with the
+# .deb package (build.py); only the launch command and icon path differ.
+cp "$RES/linux/segmentme.xml" "$MIME_FILE"
+esc() { printf '%s' "$1" | sed 's/[&|\\]/\\&/g'; }   # make a value safe inside s|..|..|
+sed -e "s|@EXEC@|$(esc "$EXEC")|" -e "s|@ICON@|$(esc "$ICON_SRC")|" \
+    "$RES/linux/segmentme.desktop" > "$DESKTOP_FILE"
 cp "$ICON_SRC" "$MIME_ICON"
 refresh
 if command -v xdg-mime >/dev/null 2>&1; then

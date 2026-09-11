@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- MIME type for SegmentME project files (shared-mime-info). Installed per
+     user by install-desktop.sh or system-wide by the .deb package. -->
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="application/x-segmentme-project">
+    <comment>SegmentME project</comment>
+    <sub-class-of type="application/json"/>
+    <glob pattern="*.SEproj"/>
+    <icon name="application-x-segmentme-project"/>
+  </mime-type>
+</mime-info>
