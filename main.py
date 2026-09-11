@@ -1,14 +1,27 @@
+import multiprocessing
+
+# Must run before anything else is imported: in a frozen (PyInstaller)
+# build, the helper processes that multiprocessing spawns -- e.g. the
+# DataLoader workers ultralytics starts while training -- re-execute this
+# very executable and must be handed off here instead of starting the GUI.
+multiprocessing.freeze_support()
+
 import os
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 import sys
 
-if len(sys.argv) > 1 and sys.argv[1] == "--inference-worker":
-    # Re-invoked as a plain subprocess by core.inference_manager.
-    # Handle it before any PyQt6/GUI import so the worker stays lightweight
-    # and works identically whether this is `python main.py` or a frozen exe.
-    from core.inference_worker import main as _inference_worker_main
-    sys.exit(_inference_worker_main())
+# Re-invoked as a plain subprocess (see services.app_process)? Handle it
+# before any PyQt6/GUI import so the worker stays lightweight and works
+# identically whether this is `python main.py` or a frozen exe. The imports
+# must stay literal: PyInstaller only bundles modules it can see imported.
+_worker_flag = sys.argv[1] if len(sys.argv) > 1 else ""
+if _worker_flag == "--inference-worker":
+    from core.inference_worker import main as _worker_main
+    sys.exit(_worker_main())
+if _worker_flag == "--training-worker":
+    from core.trainer.training_worker import main as _worker_main
+    sys.exit(_worker_main())
 
 import torch
 from ui.main_window import MainApp

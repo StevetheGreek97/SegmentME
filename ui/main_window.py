@@ -28,6 +28,7 @@ from core.managers.tool_manager import ToolManager
 from core.trainer.worker import TrainingWorker
 
 from services.file_handlers import loader, get_resource_path
+from services import model_store
 from services.logger import get_logger, log_memory_usage
 
 logger = get_logger(__name__)
@@ -47,7 +48,6 @@ class MainApp(QMainWindow):
         icon_path = get_resource_path("resources/icons/desktop.png")
         self.setWindowIcon(QIcon(icon_path))
 
-        self.models_dir = get_resource_path("models/yolo")
         self.current_model_path = None
 
         # Core state / managers
@@ -153,12 +153,16 @@ class MainApp(QMainWindow):
             logger.debug("Already at the first image")
 
     # ---------- Inference ----------
-    def popup_inference_dialog(self, dir, display_text):
+    def popup_inference_dialog(self, display_text):
         if not self.state_manager.image_paths:
             logger.warning("Inference requested with no images loaded")
             return
 
-        dialog = InferenceDialog(dir, self)
+        # YOLO weights on offer: the user's models/yolo folder plus best.pt
+        # of every training run in this project.
+        project_root = getattr(self.state_manager, "project_root", None) or getattr(self, "project_root", None)
+        model_paths = model_store.trained_models(project_root) + model_store.installed_yolo_models()
+        dialog = InferenceDialog(model_paths, self)
         if dialog.exec():
             mode = dialog.get_mode()
             threshold = dialog.get_threshold()
@@ -173,16 +177,20 @@ class MainApp(QMainWindow):
                 if sam_variant_key is None and model_path is None:
                     QMessageBox.warning(
                         self, "Run Inference",
-                        "No SAM model selected. Download one in Settings -> SAM Model "
+                        "No SAM model selected. Download one in Settings -> Models "
                         "or browse for a custom SAM2 checkpoint (.pt)."
                     )
                     return
             else:
-                selected_model = dialog.get_selected_model()
-                if not selected_model:
+                model_path = dialog.get_selected_model()
+                if not model_path:
+                    QMessageBox.warning(
+                        self, "Run Inference",
+                        "No YOLO model selected. Train one (Actions -> Train Custom Model), "
+                        "put .pt files in the models/yolo folder (Settings -> Models -> Open folder), "
+                        "or browse for a .pt file."
+                    )
                     return
-                # If the dialog returns an absolute path for custom model, use it as-is.
-                model_path = selected_model if os.path.isabs(selected_model) else os.path.join(dir, selected_model)
                 self.current_model_path = model_path
 
             # Stop any ongoing inference

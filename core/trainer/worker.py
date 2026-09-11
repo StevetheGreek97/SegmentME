@@ -1,7 +1,21 @@
-from PyQt6.QtCore import QObject, pyqtSignal
-from pathlib import Path
-import subprocess
+"""Runs YOLO training in a helper process and streams its output to the GUI.
 
+The helper is the app itself started with --training-worker (see
+services.app_process and core.trainer.training_worker), so this works from
+a source checkout and from the packaged executable alike. Shelling out to
+the `yolo` console script -- the previous approach -- only worked inside a
+Python environment that had ultralytics installed, which a PyInstaller
+bundle never is.
+"""
+import codecs
+import json
+import subprocess
+import time
+
+import psutil
+from PyQt6.QtCore import QObject, pyqtSignal
+
+from services.app_process import popen_kwargs, self_command
 from services.logger import get_logger
 
 logger = get_logger(__name__)
@@ -11,71 +25,41 @@ class TrainingWorker(QObject):
     log_signal = pyqtSignal(str)
     finished_signal = pyqtSignal()
 
+    # Minimum time between forwarded progress-bar updates (tqdm redraws its
+    # bar with '\r' many times a second; the log view only needs a sample).
+    _PROGRESS_INTERVAL = 0.25
+
     def __init__(self, settings):
         super().__init__()
         self.settings = settings
         self.process = None
+        self._stopping = False
 
     def run(self):
         try:
-            args = [
-                "yolo",
-                "train",  # this is required before the args below
-                "task=segment",
-                "mode=train",
-                f"model={self.settings.model}",
-                f"data={self.settings.data}",
-                f"epochs={self.settings.epochs}",
-                f"batch={self.settings.batch}",
-                f"imgsz={self.settings.imgsz}",
-                f"device={self.settings.device}",
-                f"optimizer={self.settings.optimizer}",
-                f"project={str(Path(self.settings.output_dir).parent)}",
-                f"name={self.settings.name}",
-                f"time={self.settings.time}",
-                f"patience={self.settings.patience}",
-                f"lr0={self.settings.lr0}",
-                f"lrf={self.settings.lrf}",
-                f"momentum={self.settings.momentum}",
-                f"weight_decay={self.settings.weight_decay}",
-                f"hsv_h={self.settings.hsv_h}",
-                f"hsv_s={self.settings.hsv_s}",
-                f"hsv_v={self.settings.hsv_v}",
-                f"degrees={self.settings.degrees}",
-                f"translate={self.settings.translate}",
-                f"scale={self.settings.scale}",
-                f"shear={self.settings.shear}",
-                f"perspective={self.settings.perspective}",
-                f"flipud={self.settings.flipud}",
-                f"fliplr={self.settings.fliplr}",
-                f"bgr={self.settings.bgr}",
-                f"mosaic={self.settings.mosaic}",
-                f"mixup={self.settings.mixup}",
-                f"cutmix={self.settings.cutmix}",
-                f"copy_paste={self.settings.copy_paste}",
-                f"copy_paste_mode={self.settings.copy_paste_mode}",
-                f"auto_augment={self.settings.auto_augment}",
-                f"erasing={self.settings.erasing}",
-            ]
+            overrides = self.settings.to_train_overrides()
+            program, arguments = self_command("--training-worker")
 
-            self.log_signal.emit(f"🔧 Command: {' '.join(args)}")
+            self.log_signal.emit("🔧 Equivalent command: " + self._describe(overrides))
             logger.info("Launching training: model=%s, data=%s, epochs=%s, device=%s",
-                        self.settings.model, self.settings.data,
-                        self.settings.epochs, self.settings.device)
+                        overrides.get("model"), overrides.get("data"),
+                        overrides.get("epochs"), overrides.get("device"))
 
             self.process = subprocess.Popen(
-                args,
+                [program, *arguments],
+                stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
-                text=True
+                **popen_kwargs(),
             )
+            self.process.stdin.write((json.dumps(overrides) + "\n").encode("utf-8"))
+            self.process.stdin.close()
 
-            for line in self.process.stdout:
-                if line:
-                    self.log_signal.emit(line.strip())
-
-            self.process.wait()
-            logger.info("Training subprocess exited with code %s", self.process.returncode)
+            self._pump_output()
+            code = self.process.wait()
+            logger.info("Training subprocess exited with code %s", code)
+            if code != 0 and not self._stopping:
+                self.log_signal.emit(f"❌ Training process exited with code {code}; see the log above.")
 
         except Exception as e:
             logger.exception("Training subprocess failed")
@@ -84,14 +68,71 @@ class TrainingWorker(QObject):
         finally:
             self.finished_signal.emit()
 
+    @staticmethod
+    def _describe(overrides):
+        return "yolo segment train " + " ".join(f"{k}={v}" for k, v in overrides.items())
+
+    def _pump_output(self):
+        """Forward the worker's output to the log as it arrives.
+
+        Lines end with '\\n', except tqdm progress bars which redraw with
+        '\\r'; both are forwarded, the latter throttled.
+        """
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        buffer = ""
+        last_progress = 0.0
+        stream = self.process.stdout
+
+        while True:
+            chunk = stream.read1(4096)
+            if not chunk:
+                break
+            buffer += decoder.decode(chunk)
+            while True:
+                nl, cr = buffer.find("\n"), buffer.find("\r")
+                if nl == -1 and cr == -1:
+                    break
+                idx = min(i for i in (nl, cr) if i != -1)
+                line, sep, buffer = buffer[:idx], buffer[idx], buffer[idx + 1:]
+                if sep == "\r" and buffer.startswith("\n"):  # '\r\n' is one terminator
+                    buffer, sep = buffer[1:], "\n"
+                line = line.strip()
+                if not line:
+                    continue
+                if sep == "\r":
+                    now = time.monotonic()
+                    if now - last_progress < self._PROGRESS_INTERVAL:
+                        continue
+                    last_progress = now
+                self.log_signal.emit(line)
+
+        tail = (buffer + decoder.decode(b"", final=True)).strip()
+        if tail:
+            self.log_signal.emit(tail)
+
     def stop(self):
-        if self.process and self.process.poll() is None:
-            self.log_signal.emit("🛑 Terminating training process...")
-            self.process.terminate()
+        if not (self.process and self.process.poll() is None):
+            return
+        self._stopping = True
+        self.log_signal.emit("🛑 Terminating training process...")
+
+        # Remember the DataLoader workers etc. so none survive as orphans.
+        try:
+            children = psutil.Process(self.process.pid).children(recursive=True)
+        except psutil.Error:
+            children = []
+
+        self.process.terminate()
+        try:
+            self.process.wait(timeout=10)
+            self.log_signal.emit("✅ Training terminated.")
+        except subprocess.TimeoutExpired:
+            self.log_signal.emit("⛔ Force killing training process...")
+            self.process.kill()
+
+        for child in children:
             try:
-                self.process.wait(timeout=10)
-                self.log_signal.emit("✅ Training terminated gracefully.")
-            except subprocess.TimeoutExpired:
-                self.log_signal.emit("⛔ Force killing training process...")
-                self.process.kill()
-            self.finished_signal.emit()
+                child.kill()
+            except psutil.Error:
+                pass
+        # run() notices the closed pipe and emits finished_signal itself.

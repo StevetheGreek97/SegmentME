@@ -1,8 +1,6 @@
 import json
 import os
 import random
-import sys
-from pathlib import Path
 
 import numpy as np
 import psutil
@@ -11,22 +9,16 @@ from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import QMessageBox
 
 from ui.dialogs.progress import ProgressDialogManager
+from services.app_process import self_command
 from services.logger import get_logger
 
 logger = get_logger(__name__)
 
 
 def _worker_command():
-    """(program, arguments) to re-launch this app as an inference worker.
-
-    Works both for `python main.py` (re-invoke the interpreter on main.py)
-    and a frozen PyInstaller exe (re-invoke the exe itself) -- main.py
-    checks for --inference-worker before importing anything GUI-related.
-    """
-    if getattr(sys, "frozen", False):
-        return sys.executable, ["--inference-worker"]
-    main_py = Path(__file__).resolve().parent.parent / "main.py"
-    return sys.executable, [str(main_py), "--inference-worker"]
+    """(program, arguments) to re-launch this app as an inference worker;
+    works from source and from a frozen exe (see services.app_process)."""
+    return self_command("--inference-worker")
 
 
 def _worker_process_environment():

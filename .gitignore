@@ -13,5 +13,8 @@ tester.py
 masks.db
 build/
 dist/
+build_env/
+build_cache/
 vendor/
 docker_projects
+.pyc

@@ -10,12 +10,67 @@ Two kinds of "paths" live here — do not mix them up:
 """
 from pathlib import Path
 
+import torch
 from sam2.build_sam import build_sam2
 
 from core.tools import sam_registry
 from services.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def _is_config_lookup_error(exc) -> bool:
+    """Did Hydra fail to *find/compose* the config (as opposed to the
+    checkpoint not fitting the architecture it describes)?"""
+    module = type(exc).__module__ or ""
+    return (module.startswith(("hydra", "omegaconf"))
+            or isinstance(exc, (ImportError, FileNotFoundError)))
+
+
+def _build_sam2_without_hydra(config_name, checkpoint, device):
+    """Build a SAM2 model from the package's YAML without Hydra's compose().
+
+    Fallback for the packaged app: Hydra's config search path relies on
+    package resources that PyInstaller does not always expose, but the YAML
+    files themselves are bundled with the sam2 package, so read the file
+    directly and instantiate it the same way build_sam2 does -- including
+    the dynamic-multimask post-processing overrides it applies.
+    """
+    import sam2
+    from hydra.utils import instantiate
+    from omegaconf import OmegaConf
+
+    yaml_path = Path(sam2.__file__).resolve().parent / config_name
+    if not yaml_path.is_file():
+        raise FileNotFoundError(f"SAM2 config {config_name} not found at {yaml_path}")
+
+    cfg = OmegaConf.load(yaml_path)
+    for key, value in (("dynamic_multimask_via_stability", True),
+                       ("dynamic_multimask_stability_delta", 0.05),
+                       ("dynamic_multimask_stability_thresh", 0.98)):
+        OmegaConf.update(cfg, f"model.sam_mask_decoder_extra_args.{key}", value, force_add=True)
+    OmegaConf.resolve(cfg)
+
+    model = instantiate(cfg.model, _recursive_=True)
+    state = torch.load(str(checkpoint), map_location="cpu", weights_only=True)["model"]
+    missing, unexpected = model.load_state_dict(state)
+    if missing or unexpected:
+        raise RuntimeError(
+            f"{Path(checkpoint).name} does not fit {config_name} "
+            f"({len(missing)} missing, {len(unexpected)} unexpected keys)")
+    return model.to(device).eval()
+
+
+def _build_sam2(config_name, checkpoint, device):
+    """build_sam2, falling back to a direct YAML load when Hydra cannot
+    resolve the config name (the usual failure inside a frozen build)."""
+    try:
+        return build_sam2(config_name, str(checkpoint), device=device)
+    except Exception as exc:
+        if not _is_config_lookup_error(exc):
+            raise
+        logger.info("Hydra could not resolve %r (%s); loading the YAML directly", config_name, exc)
+        return _build_sam2_without_hydra(config_name, checkpoint, device)
 
 
 def load_sam2_model(device, variant=None):
@@ -34,14 +89,13 @@ def load_sam2_model(device, variant=None):
     if not checkpoint.is_file():
         raise FileNotFoundError(
             f"{variant.label} checkpoint not found at {checkpoint}. "
-            f"Download it from {variant.download_url} into the sam2_configs "
-            "folder, or pick another model in Settings -> SAM Model."
+            "Download it (or pick another model) in Settings -> Models."
         )
 
     last_error = None
     for config_name in variant.configs:
         try:
-            model = build_sam2(config_name, str(checkpoint), device=device)
+            model = _build_sam2(config_name, checkpoint, device)
         except Exception as exc:
             last_error = exc
             logger.debug("SAM2 config %r did not resolve: %s", config_name, exc)
@@ -97,7 +151,7 @@ def load_sam2_custom_model(device, checkpoint_path):
     last_error = None
     for config_name in candidates:
         try:
-            model = build_sam2(config_name, str(checkpoint), device=device)
+            model = _build_sam2(config_name, checkpoint, device)
         except Exception as exc:
             last_error = exc
             logger.debug("SAM2 config %r did not fit %s: %s",

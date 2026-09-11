@@ -1,8 +1,8 @@
 """Shared, cross-platform SAM3 model loading.
 
 SAM3 has no Hydra configs — the architecture is built in code by
-`build_sam3_image_model`, so only the checkpoint lives on disk (kept next
-to the SAM2 ones in sam2_configs/).
+`build_sam3_image_model`, so only the checkpoint lives on disk (in the
+models folder, next to the SAM2 ones -- see services.model_store).
 
 The full SAM3 image model is ~3.4 GB, so unlike SAM2 the built predictor
 is cached at module level while the tool is in use (ToolManager may
@@ -11,24 +11,80 @@ button is toggled off, ToolManager calls unload_sam3_predictor() so the
 memory is returned; the next toggle rebuilds the model.
 """
 import hashlib
-from pathlib import Path
+import sys
+import types
 
 import numpy as np
 import torch
 from PIL import Image
-from sam3.model_builder import build_sam3_image_model
-from sam3.model.sam3_image_processor import Sam3Processor
 
-from services.file_handlers import get_resource_path
+from core.tools import sam_registry
 from services.logger import get_logger
 
 logger = get_logger(__name__)
 
-_CHECKPOINT = Path("sam2_configs") / "sam3.pt"
+# NOTE: nothing from the `sam3` package is imported at module level. Its
+# import chain reaches sam3.model.edt, which does `import triton` -- a package
+# that only exists next to CUDA torch on Linux -- so an eager import would
+# crash the whole app on CPU builds, Windows and macOS. See
+# _ensure_sam3_importable() and the lazy imports in load_sam3_predictor().
 
 _cached_predictor = None
 _cached_device = None
 _cpu_patch_done = False
+_triton_missing = False
+
+
+def _ensure_sam3_importable():
+    """Make `import sam3` possible on machines without triton.
+
+    sam3.model.edt (a Triton GPU kernel for the Euclidean distance
+    transform, used only by the video tracker this app never runs) does
+    `import triton` at module level. Where triton is missing, register a
+    stand-in for that one module before sam3 is imported. The name
+    `triton` itself is deliberately left alone: torch checks for it and
+    must keep seeing it as absent.
+    """
+    global _triton_missing
+    try:
+        import triton  # noqa: F401
+        return
+    except ImportError:
+        _triton_missing = True
+    if "sam3.model.edt" in sys.modules:
+        return
+
+    def edt_triton(*_args, **_kwargs):
+        raise RuntimeError(
+            "SAM3's distance transform needs Triton GPU kernels, which are not "
+            "available in this build (it is only used for video tracking).")
+
+    stand_in = types.ModuleType("sam3.model.edt")
+    stand_in.__doc__ = "SegmentME stand-in for sam3.model.edt (triton is not installed)."
+    stand_in.edt_triton = edt_triton
+    sys.modules["sam3.model.edt"] = stand_in
+    logger.info("triton is not installed; sam3.model.edt replaced by a stand-in")
+
+
+def _patch_nms_for_missing_triton():
+    """Without triton, sam3's mask NMS cannot handle CUDA tensors (it falls
+    back to a Triton kernel when the optional torch_generic_nms package is
+    absent) -- e.g. CUDA torch on Windows, which ships no triton. Route
+    those through the CPU implementation instead."""
+    from sam3.perflib import nms as nms_module
+
+    if getattr(nms_module, "_segmentme_patched", False):
+        return
+    original = nms_module.generic_nms
+
+    def generic_nms_cpu_routed(ious, scores, iou_threshold, *args, **kwargs):
+        if ious.is_cuda:
+            result = original(ious.cpu(), scores.cpu(), iou_threshold, *args, **kwargs)
+            return result.to(scores.device)
+        return original(ious, scores, iou_threshold, *args, **kwargs)
+
+    nms_module.generic_nms = generic_nms_cpu_routed
+    nms_module._segmentme_patched = True
 
 
 def _patch_sam3_for_cpu():
@@ -93,6 +149,8 @@ class Sam3InteractivePredictor:
     """
 
     def __init__(self, model, device):
+        from sam3.model.sam3_image_processor import Sam3Processor
+
         self.model = model
         self.processor = Sam3Processor(model, device=device)
         self.state = None
@@ -142,15 +200,20 @@ def load_sam3_predictor(device):
     if _cached_predictor is not None and _cached_device == str(device):
         return _cached_predictor
 
-    checkpoint = Path(get_resource_path(str(_CHECKPOINT)))
+    variant = sam_registry.SAM_VARIANTS["sam3"]
+    checkpoint = sam_registry.checkpoint_path(variant)
     if not checkpoint.is_file():
         raise FileNotFoundError(
-            f"SAM3 checkpoint not found at {checkpoint}. "
-            "Download sam3.pt from https://huggingface.co/facebook/sam3 "
-            "(gated — request access, then `hf auth login`) and place it "
-            "in the sam2_configs folder."
+            f"SAM3 checkpoint not found at {checkpoint}. Download sam3.pt from "
+            f"{variant.download_url} (gated: request access first) and import "
+            "it in Settings -> Models."
         )
 
+    _ensure_sam3_importable()
+    from sam3.model_builder import build_sam3_image_model
+
+    if _triton_missing:
+        _patch_nms_for_missing_triton()
     if not torch.cuda.is_available():
         _patch_sam3_for_cpu()
 

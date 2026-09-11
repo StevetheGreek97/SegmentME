@@ -5,8 +5,8 @@ Usage:
     from services.logger import get_logger
     logger = get_logger(__name__)
 
-Records carry the module name (e.g. "aquavision.ui.main_window"). Console
-shows INFO+ (override with the AQUAVISION_LOG_LEVEL env var, e.g. DEBUG);
+Records carry the module name (e.g. "segmentme.ui.main_window"). Console
+shows INFO+ (override with the SEGMENTME_LOG_LEVEL env var, e.g. DEBUG);
 a rotating file in the user config dir keeps DEBUG+ with tracebacks so
 crashes in the field can be diagnosed after the fact.
 """
@@ -14,11 +14,12 @@ import logging
 import logging.handlers
 import os
 import platform
+import sys
 from pathlib import Path
 
 import psutil
 
-APP_LOGGER_NAME = "aquavision"
+APP_LOGGER_NAME = "segmentme"
 
 
 def _log_dir() -> Path:
@@ -38,18 +39,20 @@ def _configure() -> logging.Logger:
     app.setLevel(logging.DEBUG)
     app.propagate = False
 
-    console = logging.StreamHandler()
-    level_name = os.getenv("AQUAVISION_LOG_LEVEL", "INFO").upper()
-    console.setLevel(getattr(logging, level_name, logging.INFO))
-    console.setFormatter(logging.Formatter(
-        "%(asctime)s %(levelname)-8s %(name)s: %(message)s", "%H:%M:%S"))
-    app.addHandler(console)
+    # A windowed (console-less) frozen app on Windows has no stderr at all.
+    if sys.stderr is not None:
+        console = logging.StreamHandler()
+        level_name = os.getenv("SEGMENTME_LOG_LEVEL", "INFO").upper()
+        console.setLevel(getattr(logging, level_name, logging.INFO))
+        console.setFormatter(logging.Formatter(
+            "%(asctime)s %(levelname)-8s %(name)s: %(message)s", "%H:%M:%S"))
+        app.addHandler(console)
 
     try:
         log_dir = _log_dir()
         log_dir.mkdir(parents=True, exist_ok=True)
         file_handler = logging.handlers.RotatingFileHandler(
-            log_dir / "aquavision.log", maxBytes=2_000_000, backupCount=3, encoding="utf-8")
+            log_dir / "segmentme.log", maxBytes=2_000_000, backupCount=3, encoding="utf-8")
         file_handler.setLevel(logging.DEBUG)
         file_handler.setFormatter(logging.Formatter(
             "%(asctime)s %(levelname)-8s %(name)s [%(filename)s:%(lineno)d]: %(message)s"))

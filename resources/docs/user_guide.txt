@@ -1,13 +1,13 @@
-# AquaVision - User Guide
+# SegmentME - User Guide
 
 ## Introduction
-AquaVision is a powerful image segmentation tool designed to help users annotate and analyze images using various segmentation techniques. It provides manual, semi-automated, and AI-assisted segmentation methods to ensure precise and efficient workflows. This guide walks you through its key features and how to use them effectively.
+SegmentME is a powerful image segmentation tool designed to help users annotate and analyze images using various segmentation techniques. It provides manual, semi-automated, and AI-assisted segmentation methods to ensure precise and efficient workflows. This guide walks you through its key features and how to use them effectively.
 
 ---
 
 ## Application Interface
 ### 1. Main Components
-AquaVision consists of the following key components:
+SegmentME consists of the following key components:
 - **Sidebar**: Provides tools for navigation, segmentation, and class management.
 - **Image Display Area**: The main workspace where images and segmentation masks are shown.
 - **Menu Bar**: Contains options for file management, inference, and exporting results.
@@ -24,7 +24,7 @@ AquaVision consists of the following key components:
 ---
 
 ## Image Segmentation Tools
-AquaVision provides three segmentation methods:
+SegmentME provides three segmentation methods:
 
 ### 1. Manual Mask Tool
 - Click **Manual Mask** in the sidebar to activate the tool.
@@ -42,19 +42,31 @@ AquaVision provides three segmentation methods:
 - If the segmentation appears incorrect, remove unnecessary anchor points and try again.
 - Press **S** to finalize and save the segmentation.
 
-### 3. AI Segmentation (SAM2)
-- Click **Segment Anything 2 (SAM2)** in the sidebar to activate the AI model.
+### 3. AI Segmentation (SAM)
+- Click **SAM** in the sidebar to activate the AI model. If the selected model is not installed yet, the app offers to download it first.
+- Choose which model powers the tool in **Settings -> Models** (SAM2 Tiny/Small/Base+/Large, SAM2.1 variants, or SAM3). Larger models are more accurate but slower; SAM3 is the most accurate and has to be downloaded by hand (see *Models* below).
 - Left-click on the object to place **foreground points** (areas belonging to the object).
 - Right-click to place **background points** (areas not part of the object).
-- Ensure that enough foreground and background points are provided for accurate segmentation.
+- Hold **Ctrl** and drag with the left mouse button to draw a **bounding box** around the object (can be combined with points).
 - Press **E** to execute AI-based segmentation and generate the mask.
 - Review the generated mask—if necessary, refine foreground and background selections and rerun segmentation.
 - Press **S** to save the final mask for further processing.
+- Toggling the SAM button off unloads the model and frees its memory; toggling it back on reloads the model (this can take a moment, especially for SAM3).
+
+---
+
+## Models
+SegmentME ships with only one model (SAM2 Tiny) to keep the download small. Everything else is fetched on demand.
+- Open **Settings -> Models** to see every model, its size and whether it is installed. Click **Download** next to a model to fetch it; a partial download resumes if it was interrupted.
+- The **DEXTR** tool and the SAM tool also offer to download their model the first time you enable them.
+- **SAM3** is gated on Hugging Face: request access at https://huggingface.co/facebook/sam3, download `sam3.pt` yourself, then click **Import file...** in Settings -> Models (or the prompt shown when enabling the tool) and select it.
+- Models are stored in the `models` folder next to the application (**Open folder** shows it). You can also copy checkpoint files there by hand, using the filenames listed in that folder's README. Set the `SEGMENTME_MODELS_DIR` environment variable to keep them elsewhere.
+- YOLO weights for **Run Inference** go in a `yolo` subfolder of the models folder; models you train inside a project are found automatically.
 
 ---
 
 ## Managing Classes
-AquaVision allows you to define and manage segmentation classes for annotation.
+SegmentME allows you to define and manage segmentation classes for annotation.
 - Click **Add Class** in the sidebar.
 - Enter a class name and select a color.
 - The class will appear in the dropdown menu.
@@ -63,10 +75,16 @@ AquaVision allows you to define and manage segmentation classes for annotation.
 ---
 
 ## Running Inference
-AquaVision enables automated segmentation using deep learning models.
+SegmentME enables automated segmentation using deep learning models.
 1. Open the **Actions** menu.
 2. Select **Run Inference (YOLO)** or **Segment Anything (SAM)**.
-3. Choose a model from the dropdown list.
+3. Choose a model from the dropdown list. The YOLO list contains the models
+   trained in this project (`trainings/.../weights/best.pt`) and any `.pt`
+   files in the `models/yolo` folder; the SAM list contains the installed
+   SAM2/2.1 models. Both dropdowns also offer **Browse for custom model...**
+   to pick your own `.pt` file from disk (for SAM this must be a SAM2/2.1-
+   architecture checkpoint, e.g. a fine-tuned one — the matching model size
+   is detected automatically).
 4. Click **OK** to start segmentation.
 
 ---
@@ -80,7 +98,7 @@ AquaVision enables automated segmentation using deep learning models.
 ---
 
 ## Exporting Annotations
-AquaVision supports exporting segmentation masks in **YOLO format**.
+SegmentME supports exporting segmentation masks in **YOLO format**.
 - Open **File > Export Results**.
 - Choose a folder for saving the YOLO annotation files.
 - The application generates `.txt` files with segmentation data and a `data.yaml` file containing class mappings.
@@ -100,11 +118,13 @@ __________________________________________
 
 ## Troubleshooting
 - **Images not loading?** Ensure the folder contains supported formats (.png, .jpg, .bmp, .tiff).
-- **Inference not working?** Ensure **YOLO/SAM models** are placed in the correct directories (`models/yolo/` and `models/sam/`).
+- **Inference not working?** Check **Settings -> Models**: the SAM model must be installed, and YOLO weights must be in the `models/yolo` folder or come from a training run in this project.
+- **A tool says its model is not installed?** Download it from **Settings -> Models** (SAM3 must be imported by hand, see *Models*).
+- **Something crashed?** The log file is in `~/.config/segmentme/logs` (Linux), `~/Library/Logs/segmentme` (macOS) or `%APPDATA%\segmentme\logs` (Windows).
 
 ---
 
 ## Contact & Support
 For assistance, refer to this documentation or contact the support team.
 
-🚀 **Happy Segmenting with AquaVision!**
+🚀 **Happy Segmenting with SegmentME!**

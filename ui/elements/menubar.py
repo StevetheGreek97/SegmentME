@@ -1,7 +1,7 @@
 from PyQt6.QtWidgets import QMenuBar, QDialog, QVBoxLayout, QTextEdit, QPushButton, QTextBrowser
 from PyQt6.QtGui import QAction, QFont
 from ui.dialogs.export_dialog import ExportDialog
-from ui.dialogs.sam_model_dialog import SamModelDialog
+from ui.dialogs.model_manager_dialog import ModelManagerDialog
 
 from core.tools import sam_registry
 from services.file_handlers import get_resource_path
@@ -54,7 +54,7 @@ class MenuBar(QMenuBar):
         actions_menu = self.addMenu("Actions")
 
         actions = [
-            ("Run Inference", lambda: self.parent.popup_inference_dialog(self.parent.models_dir, 'Running inference...')),
+            ("Run Inference", lambda: self.parent.popup_inference_dialog('Running inference...')),
              ("Train Custom Model", self.parent.popup_training_dialog)
         ]
 
@@ -90,18 +90,21 @@ class MenuBar(QMenuBar):
         settings_menu = self.addMenu("Settings")
 
         actions = [
-            ("SAM Model...", self.show_sam_model_dialog),
+            ("Models...", self.show_models_dialog),
         ]
 
         self._add_actions_to_menu(settings_menu, actions)
 
-    def show_sam_model_dialog(self):
+    def show_models_dialog(self):
         """
-        Let the user pick the model behind the SAM tool; if the tool is
-        currently active, reload it with the new model right away.
+        Manage model checkpoints and pick the model behind the SAM tool; if
+        the tool is currently active, reload it with the new model right away.
         """
-        dialog = SamModelDialog(self.parent)
-        if not dialog.exec():
+        dialog = ModelManagerDialog(self.parent)
+        accepted = dialog.exec()
+        # Models may have been downloaded even if the dialog was cancelled.
+        self.parent.sidebar.update_sam_tooltip()
+        if not accepted:
             return
 
         key = dialog.selected_key()
@@ -113,7 +116,8 @@ class MenuBar(QMenuBar):
         self.parent.sidebar.update_sam_tooltip()
 
         if self.parent.sidebar.sam.isChecked():
-            self.parent.tool_manager.enable_tool("sam")
+            if not self.parent.tool_manager.enable_tool("sam"):
+                self.parent.sidebar.sam.setChecked(False)
 
     def _init_help_menu(self):
         """
@@ -150,11 +154,11 @@ class MenuBar(QMenuBar):
         Open the user guide in a resizable, styled dialog.
         """
         doc_dialog = QDialog(self.parent)
-        doc_dialog.setWindowTitle("📖 AquaVision Documentation")
+        doc_dialog.setWindowTitle("📖 SegmentME Documentation")
         doc_dialog.resize(700, 600)  # Optimal size for readability
 
         # Load the formatted documentation
-        with open(get_resource_path("docs/user_guide.txt"), "r", encoding="utf-8") as file:
+        with open(get_resource_path("resources/docs/user_guide.txt"), "r", encoding="utf-8") as file:
             documentation_text = file.read()
 
         # Create a rich-text display with styling

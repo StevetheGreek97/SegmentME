@@ -2,131 +2,61 @@
 
 One sidebar button ("SAM") serves every variant; which one it loads is a
 user preference persisted with QSettings and edited via
-Settings -> SAM Model in the menu bar.
+Settings -> Models in the menu bar.
 
-Checkpoints all live in sam2_configs/ (SAM3's too). A variant listed here
-is only usable once its checkpoint file exists there — `is_available`
-checks that, and the settings dialog greys out missing ones with their
-download URL.
+The variants themselves are the SAM entries of services.model_store, which
+also knows where checkpoints live and how to download them. A variant is
+only usable once its checkpoint is installed -- `is_available` checks that,
+and ToolManager offers to download a missing one when the tool is enabled.
 """
-from dataclasses import dataclass
-from pathlib import Path
-
-from PyQt6.QtCore import QSettings
-
-from services.file_handlers import get_resource_path
+from services import model_store
+from services.model_store import ModelSpec as SamVariant  # noqa: F401  (kept for callers)
 
 _SETTINGS_KEY = "sam/model"
-
-_SAM2_BASE_URL = "https://dl.fbaipublicfiles.com/segment_anything_2/072824"
-_SAM21_BASE_URL = "https://dl.fbaipublicfiles.com/segment_anything_2/092824"
-
-
-@dataclass(frozen=True)
-class SamVariant:
-    key: str
-    label: str
-    family: str          # "sam2" (covers 2.1) or "sam3"
-    checkpoint: str      # filename inside sam2_configs/
-    configs: tuple = ()  # Hydra config name candidates (sam2 family only)
-    download_url: str = ""
-    description: str = ""
-
+_SETTINGS_ORG = "SegmentME"
+_LEGACY_SETTINGS_ORG = "AquaVision"  # the app's name before the rename
 
 SAM_VARIANTS = {
-    v.key: v for v in (
-        SamVariant(
-            key="sam2_tiny", label="SAM2 Tiny", family="sam2",
-            checkpoint="sam2_hiera_tiny.pt",
-            configs=("configs/sam2/sam2_hiera_t.yaml", "sam2_hiera_t.yaml"),
-            download_url=f"{_SAM2_BASE_URL}/sam2_hiera_tiny.pt",
-            description="Fastest, lowest accuracy (~156 MB).",
-        ),
-        SamVariant(
-            key="sam2_small", label="SAM2 Small", family="sam2",
-            checkpoint="sam2_hiera_small.pt",
-            configs=("configs/sam2/sam2_hiera_s.yaml", "sam2_hiera_s.yaml"),
-            download_url=f"{_SAM2_BASE_URL}/sam2_hiera_small.pt",
-            description="Fast, a bit more accurate than Tiny (~185 MB).",
-        ),
-        SamVariant(
-            key="sam2_base_plus", label="SAM2 Base+", family="sam2",
-            checkpoint="sam2_hiera_base_plus.pt",
-            configs=("configs/sam2/sam2_hiera_b+.yaml", "sam2_hiera_b+.yaml"),
-            download_url=f"{_SAM2_BASE_URL}/sam2_hiera_base_plus.pt",
-            description="Balanced speed/accuracy (~324 MB).",
-        ),
-        SamVariant(
-            key="sam2_large", label="SAM2 Large", family="sam2",
-            checkpoint="sam2_hiera_large.pt",
-            configs=("configs/sam2/sam2_hiera_l.yaml", "sam2_hiera_l.yaml"),
-            download_url=f"{_SAM2_BASE_URL}/sam2_hiera_large.pt",
-            description="Most accurate SAM2, slower (~898 MB).",
-        ),
-        SamVariant(
-            key="sam2.1_tiny", label="SAM2.1 Tiny", family="sam2",
-            checkpoint="sam2.1_hiera_tiny.pt",
-            configs=("configs/sam2.1/sam2.1_hiera_t.yaml",),
-            download_url=f"{_SAM21_BASE_URL}/sam2.1_hiera_tiny.pt",
-            description="Improved SAM2 release, fastest (~156 MB).",
-        ),
-        SamVariant(
-            key="sam2.1_small", label="SAM2.1 Small", family="sam2",
-            checkpoint="sam2.1_hiera_small.pt",
-            configs=("configs/sam2.1/sam2.1_hiera_s.yaml",),
-            download_url=f"{_SAM21_BASE_URL}/sam2.1_hiera_small.pt",
-            description="Improved SAM2 release, fast (~185 MB).",
-        ),
-        SamVariant(
-            key="sam2.1_base_plus", label="SAM2.1 Base+", family="sam2",
-            checkpoint="sam2.1_hiera_base_plus.pt",
-            configs=("configs/sam2.1/sam2.1_hiera_b+.yaml",),
-            download_url=f"{_SAM21_BASE_URL}/sam2.1_hiera_base_plus.pt",
-            description="Improved SAM2 release, balanced (~324 MB).",
-        ),
-        SamVariant(
-            key="sam2.1_large", label="SAM2.1 Large", family="sam2",
-            checkpoint="sam2.1_hiera_large.pt",
-            configs=("configs/sam2.1/sam2.1_hiera_l.yaml",),
-            download_url=f"{_SAM21_BASE_URL}/sam2.1_hiera_large.pt",
-            description="Improved SAM2 release, most accurate (~898 MB).",
-        ),
-        SamVariant(
-            key="sam3", label="SAM3", family="sam3",
-            checkpoint="sam3.pt",
-            download_url="https://huggingface.co/facebook/sam3",
-            description="Newest and most accurate; large and slow on CPU "
-                        "(~3.4 GB, gated on Hugging Face).",
-        ),
-    )
+    key: spec for key, spec in model_store.MODELS.items()
+    if spec.family in ("sam2", "sam3")
 }
 
 DEFAULT_KEY = "sam2_tiny"
 
 
-def checkpoint_path(variant: SamVariant) -> Path:
-    return Path(get_resource_path(str(Path("sam2_configs") / variant.checkpoint)))
+def checkpoint_path(variant):
+    """Where the variant's checkpoint is (or would be once downloaded)."""
+    return model_store.checkpoint_path(variant)
 
 
-def is_available(variant: SamVariant) -> bool:
-    """True if the variant's checkpoint file is on disk."""
-    return checkpoint_path(variant).is_file()
+def is_available(variant) -> bool:
+    """True if the variant's checkpoint file is installed."""
+    return model_store.is_available(variant)
 
 
 def get_selected_key() -> str:
-    """The persisted user choice, falling back to the default if the saved
-    key is unknown or its checkpoint has since been deleted."""
-    key = QSettings("AquaVision", "AquaVision").value(_SETTINGS_KEY, DEFAULT_KEY)
-    if key in SAM_VARIANTS and is_available(SAM_VARIANTS[key]):
-        return key
-    return DEFAULT_KEY
+    """The persisted user choice, or the default if nothing valid is saved.
+
+    The chosen checkpoint may not be installed yet: the SAM tool offers to
+    download it when enabled, so a user who picked SAM2 Large keeps that
+    choice instead of being silently bounced back to Tiny.
+    """
+    from PyQt6.QtCore import QSettings  # lazy: keeps worker subprocesses free of PyQt6
+
+    key = QSettings(_SETTINGS_ORG, _SETTINGS_ORG).value(_SETTINGS_KEY)
+    if key is None:
+        # Preference saved while the app was still called AquaVision.
+        key = QSettings(_LEGACY_SETTINGS_ORG, _LEGACY_SETTINGS_ORG).value(_SETTINGS_KEY, DEFAULT_KEY)
+    return key if key in SAM_VARIANTS else DEFAULT_KEY
 
 
 def set_selected_key(key: str):
+    from PyQt6.QtCore import QSettings
+
     if key not in SAM_VARIANTS:
         raise ValueError(f"Unknown SAM variant {key!r}")
-    QSettings("AquaVision", "AquaVision").setValue(_SETTINGS_KEY, key)
+    QSettings(_SETTINGS_ORG, _SETTINGS_ORG).setValue(_SETTINGS_KEY, key)
 
 
-def get_selected_variant() -> SamVariant:
+def get_selected_variant():
     return SAM_VARIANTS[get_selected_key()]

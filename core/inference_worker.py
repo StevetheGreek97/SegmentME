@@ -144,7 +144,7 @@ def _run_cellpose_sam(request, model_path):
         raise RuntimeError(
             f"{os.path.basename(model_path)} is a Cellpose-SAM model, which "
             "needs the 'cellpose' package (not installed). Install it into "
-            "the AquaVision environment with:  pip install cellpose"
+            "the SegmentME environment with:  pip install cellpose"
         )
 
     _emit({"status": "loading_model", "variant": os.path.basename(model_path)})

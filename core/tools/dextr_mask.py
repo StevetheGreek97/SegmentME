@@ -6,7 +6,7 @@ from PyQt6.QtGui import QPen, QColor, QPolygonF
 from PyQt6.QtWidgets import QGraphicsEllipseItem, QGraphicsPolygonItem
 from PyQt6.QtCore import pyqtSignal, QObject, QPointF
 from services.logger import get_logger
-from services.file_handlers import get_resource_path
+from services import model_store
 
 logger = get_logger(__name__)
 from DEXTR.networks.deeplab_resnet import resnet101
@@ -41,11 +41,17 @@ class DEXTRMasker(QObject):
 
     def _load_dextr_model(self):
         """Load the DEXTR model once."""
-        model_path = get_resource_path("models/dextr/dextr_pascal-sbd.pth")
+        spec = model_store.MODELS["dextr"]
+        model_path = model_store.find_checkpoint(spec.checkpoint)
+        if model_path is None:
+            raise FileNotFoundError(
+                f"{spec.label} checkpoint ({spec.checkpoint}) is not installed. "
+                "Download it in Settings -> Models."
+            )
         logger.info("Loading DEXTR model from %s (device=%s)", model_path, self.device)
 
         model = resnet101(1, nInputChannels=4, classifier='psp').to(self.device)
-        model.load_state_dict(torch.load(model_path, map_location=self.device))
+        model.load_state_dict(torch.load(str(model_path), map_location=self.device))
         model.eval()
 
         return model

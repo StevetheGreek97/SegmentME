@@ -204,22 +204,25 @@ class Sidebar(QWidget):
     def toggle_dextr(self):
         if self.dextr.isChecked():
             self._uncheck_others(self.dextr)
-            self.parent.tool_manager.enable_tool("dextr")
+            if not self.parent.tool_manager.enable_tool("dextr"):
+                self.dextr.setChecked(False)  # model missing/declined or failed to load
         else:
             self.parent.tool_manager.disable_tools()
 
     def toggle_sam(self):
         if self.sam.isChecked():
             self._uncheck_others(self.sam)
-            self.parent.tool_manager.enable_tool("sam")
+            if not self.parent.tool_manager.enable_tool("sam"):
+                self.sam.setChecked(False)
         else:
             self.parent.tool_manager.disable_tools()
 
     def update_sam_tooltip(self):
         """Show the currently selected model variant in the SAM tooltip."""
         variant = sam_registry.get_selected_variant()
-        self.sam.setToolTip(f"{get_tooltip('sam')}\nCurrent model: {variant.label} "
-                            "(change in Settings -> SAM Model)")
+        state = "" if sam_registry.is_available(variant) else ", not downloaded yet"
+        self.sam.setToolTip(f"{get_tooltip('sam')}\nCurrent model: {variant.label}{state} "
+                            "(change in Settings -> Models)")
 
     def toggle_intelligent_scissors(self):
         if self.intelligent_scissors.isChecked():

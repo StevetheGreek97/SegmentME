@@ -1,4 +1,5 @@
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+from pathlib import Path
 
 @dataclass
 class TrainingSettings:
@@ -38,3 +39,17 @@ class TrainingSettings:
     auto_augment: str = "none"
     erasing: float = 0.4
     output_dir: str = None
+
+    def to_train_overrides(self) -> dict:
+        """Keyword arguments for ultralytics' YOLO.train() (plus "model",
+        the weights to start from), matching what the old `yolo` command
+        line passed: `project` is the parent of the run's output folder
+        and `name` the run folder itself.
+        """
+        overrides = asdict(self)
+        output_dir = overrides.pop("output_dir")
+        overrides["project"] = str(Path(output_dir).parent)
+        overrides["task"] = "segment"
+        if not overrides.get("time"):
+            overrides["time"] = None
+        return overrides

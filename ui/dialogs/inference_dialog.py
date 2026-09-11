@@ -1,4 +1,6 @@
 import os
+from pathlib import Path
+
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QGroupBox, QFormLayout, QLabel, QDoubleSpinBox,
@@ -10,17 +12,21 @@ from core.tools import sam_registry
 
 _BROWSE_TEXT = "\U0001F4C1 Browse for custom model..."
 
-# Sentinel itemData values for the SAM combo's non-variant entries.
+# Sentinel itemData values for the combos' non-model entries.
 _SAM_BROWSE_DATA = "__browse_sam__"
 _SAM_CUSTOM_DATA = "__custom_sam__"
+_YOLO_BROWSE_DATA = "__browse_yolo__"
+_YOLO_CUSTOM_DATA = "__custom_yolo__"
 
 
 class InferenceDialog(QDialog):
-    def __init__(self, model_dir, parent=None):
+    def __init__(self, model_paths, parent=None):
+        """`model_paths`: the YOLO .pt files to offer (see
+        services.model_store.installed_yolo_models / trained_models)."""
         super().__init__(parent)
         self.setWindowTitle("Run Inference")
         self.setMinimumWidth(420)
-        self.model_dir = model_dir
+        self.model_paths = [Path(p) for p in model_paths]
         self.custom_model_path = None
 
         root = QVBoxLayout(self)
@@ -43,8 +49,11 @@ class InferenceDialog(QDialog):
 
         # -- YOLO model picker --
         self.model_selector = QComboBox()
-        self.model_selector.setToolTip("Choose a YOLO model (.pt).")
-        self.model_selector.currentTextChanged.connect(self.handle_model_selection)
+        self.model_selector.setToolTip(
+            "YOLO weights from this project's training runs and from the\n"
+            "models/yolo folder (Settings -> Models -> Open folder)."
+        )
+        self.model_selector.activated.connect(self._handle_yolo_selection)
         self.populate_models()
 
         browse_hint = QLabel("Or choose a custom .pt file from disk.")
@@ -157,11 +166,14 @@ class InferenceDialog(QDialog):
 
     # ------------------------ helpers ---------------------------------------
     def populate_models(self):
-        models = [f for f in os.listdir(self.model_dir) if f.lower().endswith(".pt")]
-        models.sort()
         self.model_selector.clear()
-        self.model_selector.addItems(models)
-        self.model_selector.addItem(_BROWSE_TEXT)
+        for path in self.model_paths:
+            label = path.name
+            if path.parent.name == "weights":
+                # <project>/trainings/<training project>/<run>/weights/best.pt
+                label = f"{path.name}  ({path.parents[2].name} / {path.parents[1].name})"
+            self.model_selector.addItem(label, str(path))
+        self.model_selector.addItem(_BROWSE_TEXT, _YOLO_BROWSE_DATA)
 
     def populate_sam_variants(self):
         self.sam_variant_selector.clear()
@@ -213,30 +225,39 @@ class InferenceDialog(QDialog):
         # SAM auto-segmentation has no confidence knob.
         self.conf_spinbox.setEnabled(not is_sam)
 
-    def handle_model_selection(self, selected_text):
-        if selected_text == _BROWSE_TEXT:
-            file_path, _ = QFileDialog.getOpenFileName(
-                self, "Select Custom Model", "", "PyTorch Model (*.pt)"
-            )
-            # If selected, insert at top and select it; else revert to first item
-            if file_path:
-                self.custom_model_path = file_path
-                base = os.path.basename(file_path)
-                if self.model_selector.findText(base) == -1:
-                    self.model_selector.insertItem(0, base)
-                self.model_selector.setCurrentIndex(0)
+    def _handle_yolo_selection(self, index):
+        if self.model_selector.itemData(index) != _YOLO_BROWSE_DATA:
+            return
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Select Custom Model", "", "PyTorch Model (*.pt)"
+        )
+        if file_path:
+            self.custom_model_path = file_path
+            base = os.path.basename(file_path)
+            custom_index = self.model_selector.findData(_YOLO_CUSTOM_DATA)
+            if custom_index == -1:
+                self.model_selector.insertItem(0, base, _YOLO_CUSTOM_DATA)
+                custom_index = 0
             else:
-                self.model_selector.setCurrentIndex(0)
-                self.custom_model_path = None
+                self.model_selector.setItemText(custom_index, base)
+            self.model_selector.setCurrentIndex(custom_index)
+        else:
+            # Cancelled: don't leave the "Browse..." row selected.
+            self.model_selector.setCurrentIndex(0)
 
     # ------------------------ getters ---------------------------------------
     def get_mode(self):
         return self.model_type_selector.currentData()
 
     def get_selected_model(self):
-        if self.custom_model_path and self.model_selector.currentIndex() == 0:
+        """Absolute path of the chosen YOLO weights, or None if nothing usable
+        is selected (no models installed and none browsed for)."""
+        data = self.model_selector.currentData()
+        if data == _YOLO_CUSTOM_DATA:
             return self.custom_model_path
-        return os.path.join(self.model_dir, self.model_selector.currentText())
+        if data in (None, _YOLO_BROWSE_DATA):
+            return None
+        return data
 
     def get_sam_variant_key(self):
         data = self.sam_variant_selector.currentData()

@@ -1,10 +1,12 @@
 import gc
 
 import torch
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication, QMessageBox
 from PyQt6.QtCore import Qt
 from core.tools.manual_mask import ManualMask
 from core.tools import sam_registry, sam3_loader
+from services import model_store
+from ui.dialogs.model_manager_dialog import ensure_model_available
 from core.tools.sam2_masker import SamMasker2
 from core.tools.sam3_masker import Sam3Masker
 from core.tools.intellignent_scissors import IntelligentScissors
@@ -22,21 +24,37 @@ class ToolManager:
         self.parent = parent
         self.current_tool = None
 
-    def enable_tool(self, tool):
+    def enable_tool(self, tool) -> bool:
         """
         Enables a tool and disables others.
+
+        Returns False when the tool could not be enabled -- its model is not
+        installed and the user declined to download it, or the model failed
+        to load -- so the caller can un-press the tool's button.
         """
         self.disable_tools()
+
+        # Model-backed tools: make sure the checkpoint is on disk first
+        # (offering to download it), instead of failing deep inside a loader.
+        if tool == "sam":
+            spec = sam_registry.get_selected_variant()
+        elif tool == "dextr":
+            spec = model_store.MODELS["dextr"]
+        else:
+            spec = None
+        if spec is not None and not ensure_model_available(self.parent, spec):
+            logger.info("Tool %r not enabled: %s is not installed", tool, spec.label)
+            return False
 
         # Show wait cursor
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
 
-
+        error = None
         try:
             if tool == "manual_mask":
                 self.current_tool = ManualMask(self.parent.image_display)
             elif tool == "sam":
-                variant = sam_registry.get_selected_variant()
+                variant = spec
                 logger.info("SAM tool using variant %r", variant.key)
                 if variant.family == "sam3":
                     self.current_tool = Sam3Masker(self.parent.image_display)
@@ -54,13 +72,19 @@ class ToolManager:
             if self.current_tool:
                 self.current_tool.mask_added.connect(self.parent.image_display.refresh_overlay)
                 logger.info("Enabled tool: %s", tool)
-        except Exception:
+        except Exception as exc:
             logger.exception("Failed to enable tool %r (model load error?)", tool)
             self.current_tool = None
+            error = exc
         finally:
             QApplication.restoreOverrideCursor()
 
-
+        if error is not None:
+            QMessageBox.critical(
+                self.parent, "Could not start tool",
+                f"The {tool} tool could not be started:\n\n{error}")
+            return False
+        return self.current_tool is not None
 
     def disable_tools(self):
         """
