@@ -150,6 +150,32 @@ a = Analysis(
     noarchive=False,
     optimize=0,
 )
+# PyQt6 ships its own copy of the MSVC++ runtime under
+# _internal/PyQt6/Qt6/bin/ (MSVCP140.dll, MSVCP140_1.dll, MSVCP140_2.dll,
+# VCRUNTIME140.dll, VCRUNTIME140_1.dll) built with an older MSVC toolset
+# (v14.26, VS2019) than the one PyInstaller collects at the bundle root for
+# Python/torch (v14.44, VS2022). Because Qt registers its own bin/
+# directory as a DLL search directory during startup, Windows' DLL loader
+# can resolve a bare "msvcp140.dll" lookup to Qt's older copy instead of
+# the newer one -- which is missing symbols torch_cpu.dll/c10.dll need,
+# so torch's own loader fails with "DLL initialization routine failed"
+# (WinError 1114) on c10.dll, or the app crashes (access violation) inside
+# PyQt6/Qt6/bin/MSVCP140.dll. The VC++ 14.x runtime is binary-compatible
+# across VS2015-VS2022, so dropping Qt's copy and letting everything use
+# the newer root-level one is safe.
+_STALE_VCRUNTIME_NAMES = {
+    "msvcp140.dll", "msvcp140_1.dll", "msvcp140_2.dll",
+    "msvcp140_atomic_wait.dll", "vcruntime140.dll", "vcruntime140_1.dll",
+    "concrt140.dll", "vcomp140.dll",
+}
+a.binaries = [
+    entry for entry in a.binaries
+    if not (
+        os.path.basename(entry[0]).lower() in _STALE_VCRUNTIME_NAMES
+        and "qt6/bin" in entry[0].replace("\\", "/").lower()
+    )
+]
+
 pyz = PYZ(a.pure)
 
 if sys.platform == "win32":

@@ -22,6 +22,29 @@ import psutil
 APP_LOGGER_NAME = "segmentme"
 
 
+class _NullStream:
+    """A harmless sink standing in for a missing stdout/stderr.
+
+    A windowed (console-less) frozen app on Windows has sys.stdout and
+    sys.stderr set to None -- there is no console for them to point at.
+    Any third-party code that writes to them directly then crashes, e.g.
+    ultralytics.data.split.autosplit()'s tqdm progress bar ("AttributeError:
+    'NoneType' object has no attribute 'write'"), which silently aborts
+    SegmentME's YOLO export before it writes the autosplit_*.txt files.
+    Installing this instead of None keeps that code working without a
+    console to print to.
+    """
+
+    def write(self, *args, **kwargs):
+        pass
+
+    def flush(self, *args, **kwargs):
+        pass
+
+    def isatty(self):
+        return False
+
+
 def _log_dir() -> Path:
     if platform.system() == "Windows":
         base = Path(os.getenv("APPDATA", Path.home() / "AppData" / "Roaming"))
@@ -39,8 +62,18 @@ def _configure() -> logging.Logger:
     app.setLevel(logging.DEBUG)
     app.propagate = False
 
-    # A windowed (console-less) frozen app on Windows has no stderr at all.
-    if sys.stderr is not None:
+    # A windowed (console-less) frozen app on Windows has no stdout/stderr at
+    # all -- both are None. Give them a harmless sink instead of leaving them
+    # None, so third-party code that writes to them directly (print(), a
+    # tqdm progress bar, ...) doesn't crash; see _NullStream. Checked before
+    # replacing them: our own console handler is still skipped in that case,
+    # exactly as before -- only the file handler below logs.
+    windowed = sys.stderr is None
+    if windowed:
+        if sys.stdout is None:
+            sys.stdout = _NullStream()
+        sys.stderr = _NullStream()
+    else:
         console = logging.StreamHandler()
         level_name = os.getenv("SEGMENTME_LOG_LEVEL", "INFO").upper()
         console.setLevel(getattr(logging, level_name, logging.INFO))

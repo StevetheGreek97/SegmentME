@@ -8,9 +8,12 @@
                                      # dependency + requirements-build.txt)
     python build.py --no-archive     # leave the folder in dist/, don't zip it
     python build.py --deb            # also build a Debian package (Linux)
+    python build.py --installer      # also build a Windows setup .exe
     python build.py --skip-build --deb --no-archive
                                      # package the dist/ folder of an earlier
                                      # run as a .deb without rebuilding
+    python build.py --skip-build --installer --no-archive
+                                     # same, as a Windows setup .exe
     docker/build.sh --deb            # the same, inside an Ubuntu 22.04 container,
                                      # for a bundle that runs on older distros
 
@@ -378,6 +381,47 @@ def make_deb(out, flavor, python):
     return deb
 
 
+def find_iscc():
+    """Locate the Inno Setup 6 command-line compiler (ISCC.exe).
+
+    winget installs it per-user under %LOCALAPPDATA%; other installers put
+    it under Program Files (x86) or Program Files.
+    """
+    candidates = [
+        Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Inno Setup 6" / "ISCC.exe",
+        Path("C:/Program Files (x86)/Inno Setup 6/ISCC.exe"),
+        Path("C:/Program Files/Inno Setup 6/ISCC.exe"),
+    ]
+    for c in candidates:
+        if c.exists():
+            return c
+    found = shutil.which("iscc") or shutil.which("ISCC")
+    if found:
+        return Path(found)
+    sys.exit(
+        "--installer needs the Inno Setup 6 command-line compiler (ISCC.exe), not found.\n"
+        "Install it with: winget install JRSoftware.InnoSetup\n"
+        "or download it from https://jrsoftware.org/isinfo.php")
+
+
+def make_installer(out, flavor):
+    """A single Windows setup .exe (Inno Setup) wrapping the PyInstaller
+    folder: installs to Program Files (or per-user, no admin needed), Start
+    Menu + optional Desktop shortcut, .SEproj file association, uninstaller
+    entry -- see installer/windows.iss for the details."""
+    if SYSTEM != "Windows":
+        sys.exit("--installer only applies to Windows builds.")
+    iscc = find_iscc()
+    run([
+        iscc,
+        f"/DAppVersion={__version__}",
+        f"/DFlavor={flavor}",
+        f"/DSourceDir={out}",
+        ROOT / "installer" / "windows.iss",
+    ])
+    return ROOT / "dist" / f"SegmentME-Setup-{__version__}-windows-{flavor}.exe"
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--flavor", choices=("cpu", "cuda"), default="cpu")
@@ -386,6 +430,9 @@ def main():
     parser.add_argument("--no-archive", action="store_true", help="don't zip/tar the result")
     parser.add_argument("--deb", action="store_true",
                         help="also build a Debian package (Linux hosts with dpkg-deb)")
+    parser.add_argument("--installer", action="store_true",
+                        help="also build a Windows setup .exe (needs Inno Setup 6's ISCC.exe; "
+                             "winget install JRSoftware.InnoSetup)")
     parser.add_argument("--skip-build", action="store_true",
                         help="reuse dist/ from a previous run instead of rebuilding "
                              "(e.g. --skip-build --deb --no-archive to package it)")
@@ -413,6 +460,8 @@ def main():
     results = []
     if args.deb:
         results.append(make_deb(out, args.flavor, python))
+    if args.installer:
+        results.append(make_installer(out, args.flavor))
     results.append(out if args.no_archive else archive(out, args.flavor))
     print("\nDone:" + "".join(f"\n  {r}" for r in results))
 
