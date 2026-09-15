@@ -24,15 +24,18 @@ if _worker_flag == "--training-worker":
     sys.exit(_worker_main())
 
 import torch
-from ui.main_window import MainApp
-from ui.dialogs.project_dialog import ProjectStartupDialog
-from services.recent_projects import save_recent_project, initialize_project
-from services.logger import get_logger
+# torch must be imported before PyQt6 (below) is: PyQt6 ships its own,
+# older copy of the MSVC++ runtime (MSVCP140.dll et al.) inside
+# PyQt6/Qt6/bin, unmangled. If QApplication() loads that first, Windows'
+# DLL search can hand torch's own loader that older, incompatible copy
+# instead of the correct one, and torch fails with "DLL initialization
+# routine failed" (WinError 1114) loading c10.dll -- reproduced by
+# swapping this order while adding the splash screen below. The packaged
+# build strips those stale DLLs at build time (see SegmentME.spec) so it
+# isn't exposed there, but a source checkout's venv still has them.
 
 from pathlib import Path
 from PyQt6.QtWidgets import QApplication, QMessageBox
-
-logger = get_logger(__name__)
 
 app = QApplication(sys.argv)
 # Lets the desktop match our windows to segmentme.desktop (registered by
@@ -40,6 +43,24 @@ app = QApplication(sys.argv)
 # WM_CLASS, the desktop file name the Wayland app id.
 app.setApplicationName("SegmentME")
 QApplication.setDesktopFileName("segmentme")
+
+# Show the splash screen before the remaining slow imports below
+# (ultralytics, the rest of the Qt UI) run, and before the startup dialog
+# or main window is built -- those take a couple of seconds in a frozen
+# build, and without this the app looks hung after a double-click.
+from ui.splash_screen import SplashScreen
+splash = SplashScreen()
+splash.show()
+app.processEvents()
+
+from ui.main_window import MainApp
+app.processEvents()
+from ui.dialogs.project_dialog import ProjectStartupDialog
+from services.recent_projects import save_recent_project, initialize_project
+from services.logger import get_logger
+app.processEvents()
+
+logger = get_logger(__name__)
 
 # Started with a project file (double-click in a file manager, or given
 # on the command line)? Open it directly instead of the startup dialog.
@@ -52,9 +73,11 @@ if len(sys.argv) > 1 and sys.argv[1].lower().endswith(".seproj"):
         save_recent_project(str(db_path))
         window = MainApp(db_path=str(db_path))
         initialize_project(window, str(db_path))
+        splash.finish(window)
         window.show()
         sys.exit(app.exec())
     else:
+        splash.close()
         logger.error("Cannot open %s: expected project database at %s", seproj_file, db_path)
         QMessageBox.critical(
             None, "SegmentME",
@@ -62,6 +85,7 @@ if len(sys.argv) > 1 and sys.argv[1].lower().endswith(".seproj"):
         )
         sys.exit(1)
 else:
+    splash.close()
     dialog = ProjectStartupDialog()
     if dialog.exec() == dialog.Accepted:
         save_recent_project(dialog.selected_project_path)
