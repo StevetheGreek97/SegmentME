@@ -6,13 +6,19 @@ name: Build
 # them on GitHub-hosted runners, including the free ARM64 ones (GA for
 # public repos since Aug 2025: ubuntu-24.04-arm, windows-11-arm).
 #
-# What's NOT built, because it isn't possible: CUDA needs an NVIDIA GPU
-# driver stack that doesn't exist for macOS or for ARM Windows/Linux, so
-# those stay CPU-only (build.py itself refuses --flavor cuda on Darwin).
+# What's NOT built, because it isn't possible:
+#   * CUDA on macOS or on ARM Windows/Linux -- no NVIDIA driver stack exists
+#     there (build.py itself refuses --flavor cuda on Darwin).
+#   * Windows on ARM64 -- confirmed by an actual CI run, not assumed. NumPy
+#     is pinned below 2.0 (sam3 requires numpy<2), and NumPy's entire 1.x
+#     series never shipped a win_arm64 wheel at all (that only arrived in
+#     2.x) -- pip falls back to a from-source build, which fails outright
+#     (numpy's own build predates win_arm64 support). Revisit if sam3 ever
+#     supports numpy>=2.
 #
-#   * Push a tag like "v2.0.1" (matching version.py) -- builds all 8
+#   * Push a tag like "v2.0.1" (matching version.py) -- builds all 7
 #     combinations, then publishes them all to one GitHub Release.
-#   * Actions tab -> "Build" -> "Run workflow" -- builds the same 8, left as
+#   * Actions tab -> "Build" -> "Run workflow" -- builds the same 7, left as
 #     downloadable workflow artifacts (90-day retention), no release
 #     published. Good for testing a change to build.py/the spec/the
 #     installer script before tagging a real release.
@@ -22,16 +28,13 @@ name: Build
 # on new repos). Without it the release job fails with a 403 creating the
 # release, even though every build job still succeeds.
 #
-# Linux builds run inside the Ubuntu 22.04 container (docker/build.sh) so
-# they install on 22.04+, not just whatever Ubuntu the runner happens to be
-# on -- see BUILDING.md's "Building for older distributions"; the container
-# is multi-arch and needs no changes to build arm64.
-#
-# windows-arm64-cpu is best-effort: it's the least-used combination (most
-# ARM Windows machines are laptops, not desktops running annotation
-# software) and the one this project has the least ability to verify here
-# -- if it ever breaks while the other 7 keep working, that's an acceptable
-# trade rather than something blocking a release.
+# Linux builds run inside a container (docker/build.sh) so they install on
+# the container's Ubuntu version+, not just whatever the runner happens to
+# be on -- see BUILDING.md's "Building for older distributions". arm64
+# needs a newer container (24.04, glibc 2.39) than x86_64 (22.04, glibc
+# 2.35): PyQt6 6.9.0's arm64 wheel needs that newer glibc, confirmed by an
+# actual CI run failing on 22.04 before docker/build.sh picked the base
+# image per architecture -- see the comment in docker/Dockerfile.
 
 on:
   workflow_dispatch:
@@ -125,27 +128,6 @@ jobs:
             dist/SegmentME-Setup-*-windows-cuda-x64.exe
           if-no-files-found: error
 
-  windows-arm64-cpu:
-    name: Windows ARM64 (CPU)
-    runs-on: windows-11-arm
-    continue-on-error: true # best-effort -- see the header comment
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Install Inno Setup
-        run: choco install innosetup -y --no-progress
-      - name: Build
-        run: python build.py --installer
-      - uses: actions/upload-artifact@v4
-        with:
-          name: segmentme-windows-arm64-cpu
-          path: |
-            dist/SegmentME-*-windows-cpu-arm64.zip
-            dist/SegmentME-Setup-*-windows-cpu-arm64.exe
-          if-no-files-found: error
-
   # Apple Silicon and Intel Macs need separate native builds (PyInstaller
   # doesn't cross-compile, and a build made on one architecture won't run on
   # the other -- see BUILDING.md). build.py tags each archive with its own
@@ -192,7 +174,6 @@ jobs:
         linux-arm64-cpu,
         windows-x64-cpu,
         windows-x64-cuda,
-        windows-arm64-cpu,
         macos-arm64,
         macos-x64,
       ]

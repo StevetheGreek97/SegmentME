@@ -6,12 +6,16 @@ is bundled; users install nothing. PyInstaller does **not** cross-compile, so
 each platform is built on that platform.
 
 **Don't have a Mac or a Windows machine?** `.github/workflows/build.yml`
-builds all three platforms (and both Mac architectures) on GitHub-hosted
-runners. Push a version tag (`v2.0.1`, matching `version.py`) to build
+builds every platform/architecture/flavour combination that's actually
+possible (7 in total -- everything except CUDA on macOS/ARM, and Windows
+ARM64 entirely, which NumPy's numpy<2 pin can't build for; see the
+workflow's header comment) on GitHub-hosted runners, including the free
+ARM64 ones. Push a version tag (`v2.0.1`, matching `version.py`) to build
 everything and publish it as a GitHub Release, or run it manually from the
-Actions tab for a CPU-only test build without publishing anything. Needs
-"Read and write permissions" under Settings -> Actions -> General ->
-Workflow permissions, set once, for the release step to be able to publish.
+Actions tab to get the same 7 as downloadable artifacts without publishing
+anything. Needs "Read and write permissions" under Settings -> Actions ->
+General -> Workflow permissions, set once, for the release step to be able
+to publish.
 
 ## Prerequisites
 
