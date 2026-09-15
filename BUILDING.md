@@ -5,6 +5,14 @@ self-contained folder (Windows and Linux) or an `.app` bundle (macOS). Python
 is bundled; users install nothing. PyInstaller does **not** cross-compile, so
 each platform is built on that platform.
 
+**Don't have a Mac or a Windows machine?** `.github/workflows/build.yml`
+builds all three platforms (and both Mac architectures) on GitHub-hosted
+runners. Push a version tag (`v2.0.1`, matching `version.py`) to build
+everything and publish it as a GitHub Release, or run it manually from the
+Actions tab for a CPU-only test build without publishing anything. Needs
+"Read and write permissions" under Settings -> Actions -> General ->
+Workflow permissions, set once, for the release step to be able to publish.
+
 ## Prerequisites
 
 | Platform | Needs |

@@ -1,0 +1,182 @@
+name: Build
+
+# Builds all three platforms in parallel, without needing to own a Mac or a
+# Windows box -- see BUILDING.md for what build.py/docker/build.sh actually
+# do on each platform; this workflow just runs them on GitHub-hosted
+# runners.
+#
+#   * Push a tag like "v2.0.1" (matching version.py) -- builds every
+#     platform and flavour, then publishes them all to a GitHub Release.
+#   * Actions tab -> "Build" -> "Run workflow" -- builds CPU-only (unless
+#     "Also build CUDA" is ticked) and leaves the results as downloadable
+#     workflow artifacts, without publishing a release. Good for testing a
+#     change to build.py/the spec/the installer script.
+#
+# One-time repo setup the release job needs: Settings -> Actions -> General
+# -> Workflow permissions -> "Read and write permissions" (off by default
+# on new repos). Without it the release job fails with a 403 creating the
+# release, even though every build job still succeeds.
+#
+# Linux builds run inside the Ubuntu 22.04 container (docker/build.sh) so
+# they install on 22.04+, not just whatever Ubuntu the runner happens to be
+# on -- see BUILDING.md's "Building for older distributions". CUDA flavours
+# are compiled but never run here (no GPU on these runners); they're
+# smoke-tested the same way the CPU ones implicitly are, by the build
+# finishing and the frozen executable importing on startup.
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_cuda:
+        description: "Also build CUDA flavour (Windows + Linux)"
+        type: boolean
+        default: false
+  push:
+    tags:
+      - "v*.*.*"
+
+jobs:
+  linux-cpu:
+    name: Linux (CPU)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build tarball + .deb
+        run: docker/build.sh --deb
+      - uses: actions/upload-artifact@v4
+        with:
+          name: segmentme-linux-cpu
+          path: |
+            dist/SegmentME-*-linux-cpu.tar.gz
+            dist/segmentme_*_amd64.deb
+          if-no-files-found: error
+
+  linux-cuda:
+    name: Linux (CUDA)
+    runs-on: ubuntu-24.04
+    if: github.event_name == 'push' || inputs.build_cuda
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build tarball + .deb
+        run: docker/build.sh --flavor cuda --deb
+      - uses: actions/upload-artifact@v4
+        with:
+          name: segmentme-linux-cuda
+          path: |
+            dist/SegmentME-*-linux-cuda.tar.gz
+            dist/segmentme-cuda_*_amd64.deb
+          if-no-files-found: error
+
+  windows-cpu:
+    name: Windows (CPU)
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+      - name: Build
+        run: python build.py --installer
+      - uses: actions/upload-artifact@v4
+        with:
+          name: segmentme-windows-cpu
+          path: |
+            dist/SegmentME-*-windows-cpu.zip
+            dist/SegmentME-Setup-*-windows-cpu.exe
+          if-no-files-found: error
+
+  windows-cuda:
+    name: Windows (CUDA)
+    runs-on: windows-2022
+    if: github.event_name == 'push' || inputs.build_cuda
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+      - name: Build
+        run: python build.py --flavor cuda --installer
+      - uses: actions/upload-artifact@v4
+        with:
+          name: segmentme-windows-cuda
+          path: |
+            dist/SegmentME-*-windows-cuda.zip
+            dist/SegmentME-Setup-*-windows-cuda.exe
+          if-no-files-found: error
+
+  # Two separate macOS jobs, not a matrix: Apple silicon and Intel Macs need
+  # separate native builds (PyInstaller doesn't cross-compile, and a build
+  # made on one architecture won't run on the other -- see BUILDING.md).
+  # Both produce a file named identically ("SegmentME-<ver>-macos-cpu.zip",
+  # build.py has no separate naming for the two), so each job renames its
+  # own output before uploading -- otherwise the release step below would
+  # have two same-named assets and fail to publish one of them.
+  macos-arm64:
+    name: macOS (Apple Silicon)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build
+        run: python3 build.py
+      - name: Tag the archive with its architecture
+        run: |
+          f=$(ls dist/SegmentME-*-macos-cpu.zip)
+          mv "$f" "${f%.zip}-arm64.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: segmentme-macos-arm64
+          path: dist/SegmentME-*-macos-cpu-arm64.zip
+          if-no-files-found: error
+
+  macos-x86_64:
+    name: macOS (Intel)
+    runs-on: macos-13
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build
+        run: python3 build.py
+      - name: Tag the archive with its architecture
+        run: |
+          f=$(ls dist/SegmentME-*-macos-cpu.zip)
+          mv "$f" "${f%.zip}-x86_64.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: segmentme-macos-x86_64
+          path: dist/SegmentME-*-macos-cpu-x86_64.zip
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs:
+      [linux-cpu, linux-cuda, windows-cpu, windows-cuda, macos-arm64, macos-x86_64]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Collect every build's output into one flat folder
+        run: |
+          mkdir -p release
+          find artifacts -type f \( -name "*.zip" -o -name "*.tar.gz" -o -name "*.deb" -o -name "*.exe" \) \
+            -exec cp {} release/ \;
+          ls -la release
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
