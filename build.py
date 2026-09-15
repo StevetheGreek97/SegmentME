@@ -197,7 +197,14 @@ def archive(out, flavor):
     base = ROOT / "dist" / f"SegmentME-{__version__}-{OS_TAG}-{flavor}"
     if SYSTEM == "Darwin":
         # ditto keeps the .app's symlinks and permissions intact.
-        target = base.with_suffix(".zip")
+        # NOT base.with_suffix(".zip"): the version number has dots in it
+        # ("2.0.0"), and with_suffix() only replaces text after the *last*
+        # dot in the filename, silently truncating everything after it --
+        # produced "SegmentME-2.0.zip" instead of
+        # "SegmentME-2.0.0-macos-cpu.zip" (caught by a real CI run: it
+        # broke the "tag the archive by architecture" step downstream,
+        # which looks for the correct name and couldn't find it).
+        target = base.parent / (base.name + ".zip")
         target.unlink(missing_ok=True)
         run(["ditto", "-c", "-k", "--sequesterRsrc", "--keepParent", out, target])
         return target
