@@ -1,16 +1,21 @@
 name: Build
 
-# Builds all three platforms in parallel, without needing to own a Mac or a
-# Windows box -- see BUILDING.md for what build.py/docker/build.sh actually
-# do on each platform; this workflow just runs them on GitHub-hosted
-# runners.
+# Builds every platform + architecture combination that's actually possible
+# for SegmentME, without needing to own that hardware -- see BUILDING.md for
+# what build.py/docker/build.sh do on each platform; this workflow just runs
+# them on GitHub-hosted runners, including the free ARM64 ones (GA for
+# public repos since Aug 2025: ubuntu-24.04-arm, windows-11-arm).
 #
-#   * Push a tag like "v2.0.1" (matching version.py) -- builds every
-#     platform and flavour, then publishes them all to a GitHub Release.
-#   * Actions tab -> "Build" -> "Run workflow" -- builds CPU-only (unless
-#     "Also build CUDA" is ticked) and leaves the results as downloadable
-#     workflow artifacts, without publishing a release. Good for testing a
-#     change to build.py/the spec/the installer script.
+# What's NOT built, because it isn't possible: CUDA needs an NVIDIA GPU
+# driver stack that doesn't exist for macOS or for ARM Windows/Linux, so
+# those stay CPU-only (build.py itself refuses --flavor cuda on Darwin).
+#
+#   * Push a tag like "v2.0.1" (matching version.py) -- builds all 8
+#     combinations, then publishes them all to one GitHub Release.
+#   * Actions tab -> "Build" -> "Run workflow" -- builds the same 8, left as
+#     downloadable workflow artifacts (90-day retention), no release
+#     published. Good for testing a change to build.py/the spec/the
+#     installer script before tagging a real release.
 #
 # One-time repo setup the release job needs: Settings -> Actions -> General
 # -> Workflow permissions -> "Read and write permissions" (off by default
@@ -19,25 +24,24 @@ name: Build
 #
 # Linux builds run inside the Ubuntu 22.04 container (docker/build.sh) so
 # they install on 22.04+, not just whatever Ubuntu the runner happens to be
-# on -- see BUILDING.md's "Building for older distributions". CUDA flavours
-# are compiled but never run here (no GPU on these runners); they're
-# smoke-tested the same way the CPU ones implicitly are, by the build
-# finishing and the frozen executable importing on startup.
+# on -- see BUILDING.md's "Building for older distributions"; the container
+# is multi-arch and needs no changes to build arm64.
+#
+# windows-arm64-cpu is best-effort: it's the least-used combination (most
+# ARM Windows machines are laptops, not desktops running annotation
+# software) and the one this project has the least ability to verify here
+# -- if it ever breaks while the other 7 keep working, that's an acceptable
+# trade rather than something blocking a release.
 
 on:
   workflow_dispatch:
-    inputs:
-      build_cuda:
-        description: "Also build CUDA flavour (Windows + Linux)"
-        type: boolean
-        default: false
   push:
     tags:
       - "v*.*.*"
 
 jobs:
-  linux-cpu:
-    name: Linux (CPU)
+  linux-x64-cpu:
+    name: Linux x64 (CPU)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -45,30 +49,44 @@ jobs:
         run: docker/build.sh --deb
       - uses: actions/upload-artifact@v4
         with:
-          name: segmentme-linux-cpu
+          name: segmentme-linux-x64-cpu
           path: |
-            dist/SegmentME-*-linux-cpu.tar.gz
+            dist/SegmentME-*-linux-cpu-x64.tar.gz
             dist/segmentme_*_amd64.deb
           if-no-files-found: error
 
-  linux-cuda:
-    name: Linux (CUDA)
+  linux-x64-cuda:
+    name: Linux x64 (CUDA)
     runs-on: ubuntu-24.04
-    if: github.event_name == 'push' || inputs.build_cuda
     steps:
       - uses: actions/checkout@v4
       - name: Build tarball + .deb
         run: docker/build.sh --flavor cuda --deb
       - uses: actions/upload-artifact@v4
         with:
-          name: segmentme-linux-cuda
+          name: segmentme-linux-x64-cuda
           path: |
-            dist/SegmentME-*-linux-cuda.tar.gz
+            dist/SegmentME-*-linux-cuda-x64.tar.gz
             dist/segmentme-cuda_*_amd64.deb
           if-no-files-found: error
 
-  windows-cpu:
-    name: Windows (CPU)
+  linux-arm64-cpu:
+    name: Linux ARM64 (CPU)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build tarball + .deb
+        run: docker/build.sh --deb
+      - uses: actions/upload-artifact@v4
+        with:
+          name: segmentme-linux-arm64-cpu
+          path: |
+            dist/SegmentME-*-linux-cpu-arm64.tar.gz
+            dist/segmentme_*_arm64.deb
+          if-no-files-found: error
+
+  windows-x64-cpu:
+    name: Windows x64 (CPU)
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
@@ -81,16 +99,15 @@ jobs:
         run: python build.py --installer
       - uses: actions/upload-artifact@v4
         with:
-          name: segmentme-windows-cpu
+          name: segmentme-windows-x64-cpu
           path: |
-            dist/SegmentME-*-windows-cpu.zip
-            dist/SegmentME-Setup-*-windows-cpu.exe
+            dist/SegmentME-*-windows-cpu-x64.zip
+            dist/SegmentME-Setup-*-windows-cpu-x64.exe
           if-no-files-found: error
 
-  windows-cuda:
-    name: Windows (CUDA)
+  windows-x64-cuda:
+    name: Windows x64 (CUDA)
     runs-on: windows-2022
-    if: github.event_name == 'push' || inputs.build_cuda
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -102,19 +119,38 @@ jobs:
         run: python build.py --flavor cuda --installer
       - uses: actions/upload-artifact@v4
         with:
-          name: segmentme-windows-cuda
+          name: segmentme-windows-x64-cuda
           path: |
-            dist/SegmentME-*-windows-cuda.zip
-            dist/SegmentME-Setup-*-windows-cuda.exe
+            dist/SegmentME-*-windows-cuda-x64.zip
+            dist/SegmentME-Setup-*-windows-cuda-x64.exe
           if-no-files-found: error
 
-  # Two separate macOS jobs, not a matrix: Apple silicon and Intel Macs need
-  # separate native builds (PyInstaller doesn't cross-compile, and a build
-  # made on one architecture won't run on the other -- see BUILDING.md).
-  # Both produce a file named identically ("SegmentME-<ver>-macos-cpu.zip",
-  # build.py has no separate naming for the two), so each job renames its
-  # own output before uploading -- otherwise the release step below would
-  # have two same-named assets and fail to publish one of them.
+  windows-arm64-cpu:
+    name: Windows ARM64 (CPU)
+    runs-on: windows-11-arm
+    continue-on-error: true # best-effort -- see the header comment
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+      - name: Build
+        run: python build.py --installer
+      - uses: actions/upload-artifact@v4
+        with:
+          name: segmentme-windows-arm64-cpu
+          path: |
+            dist/SegmentME-*-windows-cpu-arm64.zip
+            dist/SegmentME-Setup-*-windows-cpu-arm64.exe
+          if-no-files-found: error
+
+  # Apple Silicon and Intel Macs need separate native builds (PyInstaller
+  # doesn't cross-compile, and a build made on one architecture won't run on
+  # the other -- see BUILDING.md). build.py tags each archive with its own
+  # architecture (see ARCH_TAG in build.py), so, unlike the two Windows/
+  # Linux architectures, there's no naming collision to work around here.
   macos-arm64:
     name: macOS (Apple Silicon)
     runs-on: macos-14
@@ -125,17 +161,13 @@ jobs:
           python-version: "3.12"
       - name: Build
         run: python3 build.py
-      - name: Tag the archive with its architecture
-        run: |
-          f=$(ls dist/SegmentME-*-macos-cpu.zip)
-          mv "$f" "${f%.zip}-arm64.zip"
       - uses: actions/upload-artifact@v4
         with:
           name: segmentme-macos-arm64
           path: dist/SegmentME-*-macos-cpu-arm64.zip
           if-no-files-found: error
 
-  macos-x86_64:
+  macos-x64:
     name: macOS (Intel)
     runs-on: macos-13
     steps:
@@ -145,21 +177,26 @@ jobs:
           python-version: "3.12"
       - name: Build
         run: python3 build.py
-      - name: Tag the archive with its architecture
-        run: |
-          f=$(ls dist/SegmentME-*-macos-cpu.zip)
-          mv "$f" "${f%.zip}-x86_64.zip"
       - uses: actions/upload-artifact@v4
         with:
-          name: segmentme-macos-x86_64
-          path: dist/SegmentME-*-macos-cpu-x86_64.zip
+          name: segmentme-macos-x64
+          path: dist/SegmentME-*-macos-cpu-x64.zip
           if-no-files-found: error
 
   release:
     name: Publish release
     needs:
-      [linux-cpu, linux-cuda, windows-cpu, windows-cuda, macos-arm64, macos-x86_64]
-    if: startsWith(github.ref, 'refs/tags/')
+      [
+        linux-x64-cpu,
+        linux-x64-cuda,
+        linux-arm64-cpu,
+        windows-x64-cpu,
+        windows-x64-cuda,
+        windows-arm64-cpu,
+        macos-arm64,
+        macos-x64,
+      ]
+    if: always() && startsWith(github.ref, 'refs/tags/') && !cancelled()
     runs-on: ubuntu-latest
     permissions:
       contents: write

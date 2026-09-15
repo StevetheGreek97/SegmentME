@@ -5,11 +5,14 @@
 ; the .SEproj file association, and adds a normal Add/Remove Programs entry
 ; with an uninstaller.
 ;
-; Built by `python build.py --installer` (which passes AppVersion, Flavor
-; and SourceDir via /D defines -- see build_installer() in build.py) or
+; Built by `python build.py --installer` (which passes AppVersion, Flavor,
+; Arch and SourceDir via /D defines -- see make_installer() in build.py) or
 ; directly, after a normal build.py run has produced dist/SegmentME/:
 ;
-;   iscc /DAppVersion=2.0.0 /DFlavor=cpu /DSourceDir=..\dist\SegmentME installer\windows.iss
+;   iscc /DAppVersion=2.0.0 /DFlavor=cpu /DArch=x64 /DSourceDir=..\dist\SegmentME installer\windows.iss
+;
+; Arch is this project's own tag (x64 or arm64), not Inno Setup's -- see
+; ArchId below.
 ;
 ; Needs the Inno Setup 6 command-line compiler (ISCC.exe) --
 ; https://jrsoftware.org/isinfo.php.
@@ -26,8 +29,17 @@
 #ifndef SourceDir
   #define SourceDir "..\dist\SegmentME"
 #endif
+#ifndef Arch
+  #define Arch "x64"
+#endif
 #define ExeName (Flavor == "cuda" ? "SegmentME-cuda.exe" : "SegmentME.exe")
 #define DisplayName (Flavor == "cuda" ? "SegmentME (CUDA)" : "SegmentME")
+; Inno Setup's own architecture identifier, not this project's "x64"/"arm64"
+; tag: x64compatible also covers an ARM64 Windows machine running the
+; installer under x64 emulation, which is correct for an x64-flavour build,
+; but a native ARM64 build should say so explicitly so it installs as a true
+; 64-bit ARM64 app (64-bit registry/Program Files) rather than emulated.
+#define ArchId (Arch == "arm64" ? "arm64" : "x64compatible")
 
 [Setup]
 AppId={{9C3B29FD-0EC5-42F3-AA4C-47073695A81F}
@@ -39,14 +51,14 @@ DefaultDirName={autopf}\SegmentME
 DefaultGroupName=SegmentME
 DisableProgramGroupPage=yes
 OutputDir=..\dist
-OutputBaseFilename=SegmentME-Setup-{#AppVersion}-windows-{#Flavor}
+OutputBaseFilename=SegmentME-Setup-{#AppVersion}-windows-{#Flavor}-{#Arch}
 SetupIconFile=..\resources\icons\icon.ico
 WizardImageFile=..\resources\icons\installer_banner.bmp
 WizardSmallImageFile=..\resources\icons\installer_small.bmp
 Compression=lzma2
 SolidCompression=yes
-ArchitecturesAllowed=x64compatible
-ArchitecturesInstallIn64BitMode=x64compatible
+ArchitecturesAllowed={#ArchId}
+ArchitecturesInstallIn64BitMode={#ArchId}
 UninstallDisplayIcon={app}\{#ExeName}
 ; No admin rights required: installs per-user under AppData if the user
 ; declines elevation, or to Program Files if they accept/run as admin.

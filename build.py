@@ -51,6 +51,16 @@ from services import model_store  # noqa: E402
 
 SYSTEM = platform.system()  # "Windows", "Linux" or "Darwin"
 OS_TAG = {"Windows": "windows", "Linux": "linux", "Darwin": "macos"}[SYSTEM]
+# platform.machine() spells the same architecture differently per OS
+# ("AMD64" on Windows, "x86_64" on Linux/macOS; "arm64" on macOS/Windows,
+# "aarch64" on Linux) -- normalized so a filename means the same thing
+# everywhere. Needed now that CI builds both architectures for Linux and
+# Windows: without an architecture tag, an x86_64 and an arm64 build of the
+# same version produce an identically named archive and silently clobber
+# each other (caught before it shipped -- see the macOS zip, which used to
+# have this same collision between the Intel and Apple Silicon builds).
+ARCH_TAG = {"AMD64": "x64", "x86_64": "x64", "aarch64": "arm64"}.get(
+    platform.machine(), platform.machine())
 
 TORCH_INDEX = {
     "cpu": "https://download.pytorch.org/whl/cpu",
@@ -194,7 +204,7 @@ def add_linux_desktop_script(out):
 
 # ----------------------------------------------------------------- step 4
 def archive(out, flavor):
-    base = ROOT / "dist" / f"SegmentME-{__version__}-{OS_TAG}-{flavor}"
+    base = ROOT / "dist" / f"SegmentME-{__version__}-{OS_TAG}-{flavor}-{ARCH_TAG}"
     if SYSTEM == "Darwin":
         # ditto keeps the .app's symlinks and permissions intact.
         # NOT base.with_suffix(".zip"): the version number has dots in it
@@ -423,10 +433,11 @@ def make_installer(out, flavor):
         iscc,
         f"/DAppVersion={__version__}",
         f"/DFlavor={flavor}",
+        f"/DArch={ARCH_TAG}",
         f"/DSourceDir={out}",
         ROOT / "installer" / "windows.iss",
     ])
-    return ROOT / "dist" / f"SegmentME-Setup-{__version__}-windows-{flavor}.exe"
+    return ROOT / "dist" / f"SegmentME-Setup-{__version__}-windows-{flavor}-{ARCH_TAG}.exe"
 
 
 def main():
