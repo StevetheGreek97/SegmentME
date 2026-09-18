@@ -9,11 +9,14 @@
     python build.py --no-archive     # leave the folder in dist/, don't zip it
     python build.py --deb            # also build a Debian package (Linux)
     python build.py --installer      # also build a Windows setup .exe
+    python build.py --dmg            # also build a macOS disk image (.dmg)
     python build.py --skip-build --deb --no-archive
                                      # package the dist/ folder of an earlier
                                      # run as a .deb without rebuilding
     python build.py --skip-build --installer --no-archive
                                      # same, as a Windows setup .exe
+    python build.py --skip-build --dmg --no-archive
+                                     # same, as a macOS .dmg
     docker/build.sh --deb            # the same, inside an Ubuntu 22.04 container,
                                      # for a bundle that runs on older distros
 
@@ -28,6 +31,9 @@ Steps
   5. With --deb (Linux): wrap the same folder as dist/segmentme_<version>_<arch>.deb
      -- the app in /opt/segmentme, a launcher in /usr/bin, and the menu
      entry, .SEproj file type and icons installed system-wide.
+     With --installer (Windows): wrap it as a Setup.exe (Inno Setup).
+     With --dmg (macOS): wrap SegmentME.app in a disk image with a
+     drag-to-Applications shortcut, the standard mac install experience.
 
 PyInstaller does not cross-compile: run this once per OS you want to ship.
 Needs Python 3.10-3.12 and an internet connection; git is not required.
@@ -440,6 +446,28 @@ def make_installer(out, flavor):
     return ROOT / "dist" / f"SegmentME-Setup-{__version__}-windows-{flavor}-{ARCH_TAG}.exe"
 
 
+def make_dmg(out, flavor):
+    """A macOS disk image wrapping SegmentME.app with a drag-to-Applications
+    shortcut -- the standard mac install experience, roughly the Mac
+    equivalent of the Windows Setup.exe. out is the folder output_dir()
+    produced, holding <name>.app."""
+    if SYSTEM != "Darwin":
+        sys.exit("--dmg only applies to macOS builds.")
+    name = app_name(flavor)
+    staging = ROOT / "build" / f"dmg-{flavor}"
+    shutil.rmtree(staging, ignore_errors=True)
+    staging.mkdir(parents=True)
+    shutil.copytree(out / f"{name}.app", staging / f"{name}.app", symlinks=True)
+    (staging / "Applications").symlink_to("/Applications")
+
+    dmg = ROOT / "dist" / f"SegmentME-{__version__}-{OS_TAG}-{flavor}-{ARCH_TAG}.dmg"
+    dmg.unlink(missing_ok=True)
+    run(["hdiutil", "create", "-volname", name, "-srcfolder", staging,
+         "-format", "UDZO", dmg])
+    shutil.rmtree(staging, ignore_errors=True)
+    return dmg
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--flavor", choices=("cpu", "cuda"), default="cpu")
@@ -451,6 +479,8 @@ def main():
     parser.add_argument("--installer", action="store_true",
                         help="also build a Windows setup .exe (needs Inno Setup 6's ISCC.exe; "
                              "winget install JRSoftware.InnoSetup)")
+    parser.add_argument("--dmg", action="store_true",
+                        help="also build a macOS disk image (needs hdiutil, i.e. a macOS build host)")
     parser.add_argument("--skip-build", action="store_true",
                         help="reuse dist/ from a previous run instead of rebuilding "
                              "(e.g. --skip-build --deb --no-archive to package it)")
@@ -480,6 +510,8 @@ def main():
         results.append(make_deb(out, args.flavor, python))
     if args.installer:
         results.append(make_installer(out, args.flavor))
+    if args.dmg:
+        results.append(make_dmg(out, args.flavor))
     results.append(out if args.no_archive else archive(out, args.flavor))
     print("\nDone:" + "".join(f"\n  {r}" for r in results))
 
