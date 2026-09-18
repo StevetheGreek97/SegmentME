@@ -56,10 +56,10 @@ jobs:
     name: Linux x64 (CPU)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Build tarball + .deb
         run: docker/build.sh --deb
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: segmentme-linux-x64-cpu
           path: |
@@ -71,10 +71,10 @@ jobs:
     name: Linux x64 (CUDA)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Build tarball + .deb
         run: docker/build.sh --flavor cuda --deb
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: segmentme-linux-x64-cuda
           path: |
@@ -86,10 +86,10 @@ jobs:
     name: Linux ARM64 (CPU)
     runs-on: ubuntu-24.04-arm
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Build tarball + .deb
         run: docker/build.sh --deb
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: segmentme-linux-arm64-cpu
           path: |
@@ -101,15 +101,15 @@ jobs:
     name: Windows x64 (CPU)
     runs-on: windows-2022
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Install Inno Setup
         run: choco install innosetup -y --no-progress
       - name: Build
         run: python build.py --installer --no-archive
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: segmentme-windows-x64-cpu
           path: dist/SegmentME-Setup-*-windows-cpu-x64.exe
@@ -119,15 +119,15 @@ jobs:
     name: Windows x64 (CUDA)
     runs-on: windows-2022
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Install Inno Setup
         run: choco install innosetup -y --no-progress
       - name: Build
         run: python build.py --flavor cuda --installer --no-archive
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: segmentme-windows-x64-cuda
           path: dist/SegmentME-Setup-*-windows-cuda-x64.exe
@@ -142,13 +142,13 @@ jobs:
     name: macOS (Apple Silicon)
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Build
         run: python3 build.py --dmg --no-archive
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: segmentme-macos-arm64
           path: dist/SegmentME-*-macos-cpu-arm64.dmg
@@ -170,7 +170,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
       - name: Collect every build's output into one flat folder
