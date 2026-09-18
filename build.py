@@ -230,7 +230,7 @@ def archive(out, flavor):
 
 # ----------------------------------------------------------------- step 5
 DEB_MAINTAINER = "StevetheGreek97 <mavrianosstelios@icloud.com>"
-DEB_HOMEPAGE = "https://github.com/StevetheGreek97/AquaVision"
+DEB_HOMEPAGE = "https://github.com/StevetheGreek97/SegmentME"
 # Needed for dpkg's file triggers, which rebuild the desktop, MIME and icon
 # caches after installation (so the package needs no maintainer scripts).
 DEB_EXTRA_DEPENDS = ("desktop-file-utils", "shared-mime-info", "hicolor-icon-theme")

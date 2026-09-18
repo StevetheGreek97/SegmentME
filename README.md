@@ -7,8 +7,8 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/StevetheGreek97/AquaVision/actions/workflows/build.yml">
-    <img src="https://github.com/StevetheGreek97/AquaVision/actions/workflows/build.yml/badge.svg" alt="Build status" />
+  <a href="https://github.com/StevetheGreek97/SegmentME/actions/workflows/build.yml">
+    <img src="https://github.com/StevetheGreek97/SegmentME/actions/workflows/build.yml/badge.svg" alt="Build status" />
   </a>
   <a href="LICENSE">
     <img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License: Apache 2.0" />
@@ -20,7 +20,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/StevetheGreek97/AquaVision/releases/latest">Download</a> ·
+  <a href="https://github.com/StevetheGreek97/SegmentME/releases/latest">Download</a> ·
   <a href="https://segmentme.streamlit.app">Full Documentation</a> ·
   <a href="BUILDING.md">Build from Source</a>
 </p>
@@ -65,7 +65,7 @@ See the [full keyboard & mouse reference](https://segmentme.streamlit.app) for e
 
 ## Installation
 
-Grab the build for your platform from the [latest release](https://github.com/StevetheGreek97/AquaVision/releases/latest).
+Grab the build for your platform from the [latest release](https://github.com/StevetheGreek97/SegmentME/releases/latest).
 
 | Platform | What you get |
 |---|---|
@@ -81,7 +81,7 @@ troubleshooting.
 ### Running from source
 
 ```bash
-git clone https://github.com/StevetheGreek97/AquaVision.git SegmentME
+git clone https://github.com/StevetheGreek97/SegmentME.git
 cd SegmentME
 ./install.sh   # Linux/macOS -- install.bat on Windows
 ./run.sh       # Linux/macOS -- run.bat on Windows
