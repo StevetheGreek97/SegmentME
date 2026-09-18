@@ -1,0 +1,36 @@
+name: Check model URLs
+
+# Once a week, checks that every model the app can download (services/
+# model_store.py) is still at its URL and still the size the app expects --
+# see scripts/check_model_urls.py. If Meta or anyone else moves or replaces a
+# file, users would hit a failed download in Settings -> Models; this catches
+# it before they do.
+#
+# Failure alerts: when a scheduled run fails, GitHub emails the person who last
+# edited the cron line below (a failure-only email; on by default -- see
+# GitHub -> Settings -> Notifications -> "Actions"). No SMTP setup needed.
+#
+# Two things to know:
+#   * Scheduled workflows only run from the default branch (main).
+#   * GitHub pauses scheduled workflows in a repo with no activity for 60 days;
+#     any push, or "Enable workflow" in the Actions tab, turns it back on.
+#
+# Run it by hand any time: Actions tab -> "Check model URLs" -> "Run workflow".
+
+on:
+  schedule:
+    - cron: "17 6 * * 1" # Mondays, 06:17 UTC (off the top of the hour, when GitHub is busiest)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Check model download URLs
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check every model URL
+        run: python3 scripts/check_model_urls.py

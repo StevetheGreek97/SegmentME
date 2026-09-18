@@ -74,9 +74,17 @@ Grab the build for your platform from the [latest release](https://github.com/St
 | **Linux (other distros)** | `SegmentME-<version>-linux-<flavor>-<arch>.tar.gz` — extract, then run `./install-desktop.sh` |
 | **macOS (Apple Silicon)** | `SegmentME-<version>-macos-cpu-arm64.dmg` — open it, drag SegmentME into Applications |
 
-`<flavor>` is `cpu` or `cuda` (Windows/Linux only — CUDA needs an NVIDIA GPU; if you're not sure, `cpu` works
-everywhere). See the [step-by-step install guide](https://segmentme.streamlit.app) for details, screenshots, and
-troubleshooting.
+`<flavor>` is `cpu` or `cuda` (CUDA needs an NVIDIA GPU; if you're not sure, `cpu` works everywhere). See the
+[step-by-step install guide](https://segmentme.streamlit.app) for details, screenshots, and troubleshooting.
+
+**Linux CUDA downloads come in parts.** They're about 3.5 GB per file and GitHub caps each release file at 2 GiB, so
+download every `.part-NN` file for your format, then join and verify them before installing:
+
+```bash
+cat segmentme-cuda_<version>_amd64.deb.part-* > segmentme-cuda_<version>_amd64.deb
+sha256sum --ignore-missing -c SHA256SUMS
+sudo apt install ./segmentme-cuda_<version>_amd64.deb
+```
 
 ### Running from source
 

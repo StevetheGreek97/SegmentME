@@ -7,15 +7,22 @@ each platform is built on that platform.
 
 **Don't have a Mac or a Windows machine?** `.github/workflows/build.yml`
 builds every platform/architecture/flavour combination that's actually
-possible (7 in total -- everything except CUDA on macOS/ARM, and Windows
-ARM64 entirely, which NumPy's numpy<2 pin can't build for; see the
-workflow's header comment) on GitHub-hosted runners, including the free
-ARM64 ones. Push a version tag (`v2.0.1`, matching `version.py`) to build
-everything and publish it as a GitHub Release, or run it manually from the
-Actions tab to get the same 7 as downloadable artifacts without publishing
-anything. Needs "Read and write permissions" under Settings -> Actions ->
-General -> Workflow permissions, set once, for the release step to be able
-to publish.
+possible (6 in total -- everything except CUDA on macOS/ARM, Windows ARM64
+entirely, which NumPy's numpy<2 pin can't build for, and macOS Intel, whose
+hosted runner GitHub retired; see the workflow's header comment) on
+GitHub-hosted runners, including the free ARM64 ones. Push a version tag
+(`v2.0.1`, matching `version.py`) to build everything and publish it as a
+GitHub Release, or run it manually from the Actions tab to get the same 6 as
+downloadable artifacts without publishing anything. Needs "Read and write
+permissions" under Settings -> Actions -> General -> Workflow permissions,
+set once, for the release step to be able to publish.
+
+GitHub Releases rejects any file of 2 GiB or more, so
+`scripts/prepare_release_files.sh` cuts oversized files into `.part-NN` pieces
+(under 2 GiB each) and writes a `SHA256SUMS` file for the originals. Today
+that is the Linux CUDA tarball and `.deb` (~3.5 GB each); users join the
+parts with `cat name.part-* > name` and check them with
+`sha256sum --ignore-missing -c SHA256SUMS`. The release notes explain this.
 
 ## Prerequisites
 

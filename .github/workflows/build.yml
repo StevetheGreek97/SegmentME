@@ -67,6 +67,9 @@ jobs:
             dist/segmentme_*_amd64.deb
           if-no-files-found: error
 
+  # Its two files are ~3.5 GB each, over GitHub Releases' 2 GiB per-file limit,
+  # so the release job publishes them in .part-NN pieces that users join with
+  # `cat` (see scripts/prepare_release_files.sh and the release notes).
   linux-x64-cuda:
     name: Linux x64 (CUDA)
     runs-on: ubuntu-24.04
@@ -173,16 +176,29 @@ jobs:
       - uses: actions/download-artifact@v8
         with:
           path: artifacts
+      # Copies every installer/archive into release/, plus a SHA256SUMS file.
+      # GitHub rejects any single release file of 2 GiB or more, so the Linux
+      # CUDA files (~3.5 GB each) are cut into .part-NN pieces -- see the script.
       - name: Collect every build's output into one flat folder
-        run: |
-          mkdir -p release
-          find artifacts -type f \( -name "*.zip" -o -name "*.tar.gz" -o -name "*.deb" -o -name "*.exe" -o -name "*.dmg" \) \
-            -exec cp {} release/ \;
-          ls -la release
+        run: bash scripts/prepare_release_files.sh artifacts release
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: release/*
           generate_release_notes: true
+          body: |
+            ### Linux CUDA build (NVIDIA GPUs)
+
+            GitHub limits each release file to 2 GiB and the Linux CUDA bundle is bigger, so it is published in parts.
+            Download **every** `.part-NN` file for your format (`.deb` for Debian/Ubuntu/Mint, `.tar.gz` for other
+            distributions), then join, verify and install:
+
+            ```bash
+            cat segmentme-cuda_<version>_amd64.deb.part-* > segmentme-cuda_<version>_amd64.deb
+            sha256sum --ignore-missing -c SHA256SUMS
+            sudo apt install ./segmentme-cuda_<version>_amd64.deb
+            ```
+
+            For the tarball: `cat SegmentME-<version>-linux-cuda-x64.tar.gz.part-* > SegmentME-<version>-linux-cuda-x64.tar.gz`.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
