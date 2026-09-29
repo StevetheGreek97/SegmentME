@@ -10,6 +10,11 @@
 # Used by .github/workflows/build.yml:
 #   bash scripts/prepare_release_files.sh artifacts release
 #
+# The runner has limited disk space and this handles ~11 GB of downloaded
+# artifacts, so files are moved (not copied) into place, and a big file's
+# original is deleted as soon as it's been split -- peak extra usage is one
+# file's worth (the largest is ~3.7 GB), not the whole ~11 GB doubled.
+#
 # LIMIT_BYTES and PART_SIZE exist so the splitting can be tested with tiny files.
 set -euo pipefail
 
@@ -26,10 +31,11 @@ while IFS= read -r -d '' file; do
     size=$(stat -c %s "$file")
     (cd "$(dirname "$file")" && sha256sum "$name") >> "$out/SHA256SUMS"
     if [ "$size" -lt "$limit" ]; then
-        cp "$file" "$out/"
+        mv "$file" "$out/"
     else
         echo "::notice title=Split for upload::$name is $size bytes, over the 2 GiB release limit: publishing it in parts"
         split -b "$part" -d -a 2 "$file" "$out/$name.part-"
+        rm -f "$file"
     fi
 done < <(find "$src" -type f \( -name "*.zip" -o -name "*.tar.gz" -o -name "*.deb" -o -name "*.exe" -o -name "*.dmg" \) -print0 | sort -z)
 
