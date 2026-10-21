@@ -1,3 +1,6 @@
+import time
+import weakref
+
 import numpy as np
 from PyQt6.QtGui import QPen, QColor, QPolygonF
 from PyQt6.QtWidgets import QGraphicsEllipseItem, QGraphicsPolygonItem, QGraphicsRectItem
@@ -19,8 +22,20 @@ class SamMasker2(QObject):
     * left click        — positive (foreground) point
     * right click       — negative (background) point
     * Ctrl + left drag  — bounding box
+
+    SAM resizes whatever it is given to a fixed square (1024 x 1024 for SAM2),
+    so on a large scan objects shrink ~10x and the masks come out coarse. The
+    tool therefore runs SAM on a full-resolution window around the prompts
+    instead of the whole image (see generate_mask).
     """
     mask_added = pyqtSignal(str, np.ndarray)
+
+    # Side of the window SAM looks at, in image pixels: SAM2's input size, so
+    # a window this big is segmented at the image's own resolution.
+    WINDOW_SIZE = 1024
+    # How often the window may double when the mask runs into its edge (an
+    # object bigger than the window); after that the result is used as is.
+    MAX_WINDOW_GROWTH = 3
 
     def __init__(self, parent, device: str = "cpu", variant=None):
         """
@@ -54,6 +69,13 @@ class SamMasker2(QObject):
 
         self.current_polygon_item = None  # Reference to displayed polygon
         self.mask = None
+
+        # The window SAM currently holds an embedding for, and a weak reference
+        # to the image it was cut from: reused while the prompts stay inside it,
+        # and never stale, since the reference dies with the image.
+        self._embedded_image = None   # weakref.ref to the image array
+        self._embedded_window = None  # (x0, y0, x1, y1)
+        self._object_window_side = None  # window side the current object needed
 
     def _load_model(self):
         """Load the SAM 2 model once."""
@@ -157,37 +179,133 @@ class SamMasker2(QObject):
 
     def generate_mask(self, image: np.ndarray) -> np.ndarray:
         """
-        Generate a mask using the SAM 2 model based on added points and/or bounding box.
+        Generate a mask using the SAM model based on added points and/or bounding box.
+
+        SAM runs on a window of the image around the prompts, at least
+        WINDOW_SIZE pixels a side, at full resolution. If the mask runs into
+        the window's edge (inside the image), the window doubles and SAM runs
+        again, up to MAX_WINDOW_GROWTH times.
 
         Args:
             image (numpy.ndarray): The input image for mask generation.
 
         Returns:
-            numpy.ndarray: Generated mask.
+            numpy.ndarray: Generated mask polygon (Nx2, image coordinates).
         """
         if self.box is None and not self.foreground_points:
             logger.warning("Cannot generate mask: no box or foreground points added")
             return None
 
-        points = np.array(self.foreground_points + self.background_points)
-        labels = np.array([1] * len(self.foreground_points) + [0] * len(self.background_points))
+        points = np.array(self.foreground_points + self.background_points,
+                          dtype=np.float32).reshape(-1, 2)
+        labels = np.array([1] * len(self.foreground_points) + [0] * len(self.background_points),
+                          dtype=np.int32)
+        box = None
+        if self.box is not None:  # as dragged; SAM wants top-left, bottom-right
+            x1, y1, x2, y2 = (float(v) for v in self.box)
+            box = np.array([min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2)], dtype=np.float32)
 
-        self.predictor.set_image(image)
-        masks, scores, _ = self.predictor.predict(
-            point_coords=points if len(points) > 0 else None,
-            point_labels=labels if len(labels) > 0 else None,
-            box=self.box[None, :] if self.box is not None else None,
-            multimask_output=False
-        )
-        mask = masks[0]
+        side = self._initial_window_side(points, box)
+        for growth in range(self.MAX_WINDOW_GROWTH + 1):
+            window = self._window_for(image, points, box, side)
+            mask = self._predict_in_window(image, window, points, labels, box)
+            whole_image = window == (0, 0, image.shape[1], image.shape[0])
+            if (growth == self.MAX_WINDOW_GROWTH or whole_image
+                    or not self._cut_by_window(mask, window, image.shape)):
+                break
+            side *= 2
+            logger.debug("SAM mask reaches the window edge; retrying with a %d px window", side)
+        self._object_window_side = side
 
-        contours, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        polygon = contours[0].squeeze(axis=1).tolist() if contours else []
+        contours, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL,
+                                       cv2.CHAIN_APPROX_SIMPLE, offset=window[:2])
+        # The largest piece is the object; SAM often adds specks around it.
+        polygon = max(contours, key=cv2.contourArea).squeeze(axis=1).tolist() if contours else []
 
         self.display_polygon(polygon)
         self.mask = np.array(polygon, dtype=np.float32)
 
         return self.mask
+
+    # ------------------------------------------------------------ windowing
+    @staticmethod
+    def _prompt_extent(points, box):
+        """(xmin, ymin, xmax, ymax) around all prompt points and the box."""
+        xy = points if box is None else np.vstack([points, box.reshape(2, 2)])
+        return xy[:, 0].min(), xy[:, 1].min(), xy[:, 0].max(), xy[:, 1].max()
+
+    def _initial_window_side(self, points, box):
+        """WINDOW_SIZE, more when the prompts span a big area (with room around
+        them), and at least what this object needed last time (refining it)."""
+        xmin, ymin, xmax, ymax = self._prompt_extent(points, box)
+        side = max(self.WINDOW_SIZE, int(max(xmax - xmin, ymax - ymin) * 1.5) + 64)
+        return max(side, self._object_window_side or 0)
+
+    def _window_for(self, image, points, box, side):
+        """
+        Square window of `side` pixels centred on the prompts, shifted to lie
+        inside the image (as wide or tall as the image where it is smaller).
+
+        The window SAM already holds is kept instead when it fits: big enough
+        (but not over twice the size), with the prompts in its middle half.
+        That way refining an object, or the next object close by, needs no new
+        embedding.
+        """
+        H, W = image.shape[:2]
+        w, h = min(side, W), min(side, H)
+        xmin, ymin, xmax, ymax = self._prompt_extent(points, box)
+
+        held = self._held_window(image)
+        if held is not None:
+            x0, y0, x1, y1 = held
+            mx, my = (x1 - x0) // 4, (y1 - y0) // 4
+            size_ok = w <= x1 - x0 <= 2 * w and h <= y1 - y0 <= 2 * h
+            inside = ((x0 == 0 or xmin - x0 >= mx) and (y0 == 0 or ymin - y0 >= my)
+                      and (x1 == W or x1 - xmax >= mx) and (y1 == H or y1 - ymax >= my))
+            if size_ok and inside:
+                return held
+
+        cx, cy = (xmin + xmax) / 2, (ymin + ymax) / 2
+        x0 = int(min(max(round(cx - w / 2), 0), W - w))
+        y0 = int(min(max(round(cy - h / 2), 0), H - h))
+        return (x0, y0, x0 + w, y0 + h)
+
+    def _held_window(self, image):
+        """The window SAM holds an embedding for, if it was cut from `image`."""
+        ref = self._embedded_image
+        if ref is not None and ref() is image:
+            return self._embedded_window
+        return None
+
+    def _predict_in_window(self, image, window, points, labels, box):
+        """Run SAM on `window`, embedding it first unless it already holds it.
+        Returns the window's mask as a bool array."""
+        x0, y0, x1, y1 = window
+        if self._held_window(image) != window:
+            t0 = time.perf_counter()
+            self.predictor.set_image(np.ascontiguousarray(image[y0:y1, x0:x1]))
+            self._embedded_image = weakref.ref(image)
+            self._embedded_window = window
+            logger.debug("SAM embedded window x=%d-%d, y=%d-%d (%dx%d px) in %.2f s",
+                         x0, x1, y0, y1, x1 - x0, y1 - y0, time.perf_counter() - t0)
+
+        offset = np.array([x0, y0], dtype=np.float32)
+        masks, _, _ = self.predictor.predict(
+            point_coords=points - offset if len(points) else None,
+            point_labels=labels if len(labels) else None,
+            box=(box - np.tile(offset, 2))[None, :] if box is not None else None,
+            multimask_output=False,
+        )
+        return masks[0] > 0
+
+    @staticmethod
+    def _cut_by_window(mask, window, shape):
+        """True when the mask touches a window edge that is not an image edge:
+        the object probably continues outside the window."""
+        x0, y0, x1, y1 = window
+        H, W = shape[:2]
+        return bool((x0 > 0 and mask[:, 0].any()) or (y0 > 0 and mask[0, :].any())
+                    or (x1 < W and mask[:, -1].any()) or (y1 < H and mask[-1, :].any()))
 
     def clear_temp_items(self):
         """
@@ -210,6 +328,7 @@ class SamMasker2(QObject):
             self.current_polygon_item = None
 
         self.mask = None
+        self._object_window_side = None  # the next object starts with a fresh window size
         logger.debug("Cleared temporary items")
 
     def complete_mask(self):

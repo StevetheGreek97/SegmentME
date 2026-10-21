@@ -1,6 +1,8 @@
+import codecs
 import json
 import os
 import random
+import re
 
 import numpy as np
 import psutil
@@ -13,6 +15,13 @@ from services.app_process import self_command
 from services.logger import get_logger
 
 logger = get_logger(__name__)
+
+# Worker log lines end in \n; progress bars of third-party libraries redraw with \r.
+_LINE_BREAK = re.compile(r"\r\n|\r|\n")
+
+# After reporting a fatal error the worker exits on its own; if it has not
+# after this long, it is stopped.
+_FATAL_EXIT_GRACE_MS = 5000
 
 
 def _worker_command():
@@ -36,6 +45,19 @@ def _worker_process_environment():
     return env
 
 
+def _remove_worker_temp_dirs(pid):
+    """Delete tile folders a killed HiReS worker had no chance to clean up
+    (named segmentme-hires-<pid>-*, see core.inference_worker)."""
+    if not pid:
+        return
+    import glob
+    import shutil
+    import tempfile
+
+    for path in glob.glob(os.path.join(tempfile.gettempdir(), f"segmentme-hires-{pid}-*")):
+        shutil.rmtree(path, ignore_errors=True)
+
+
 class InferenceManager(QObject):
     def __init__(self, parent, mode, display_text):
         super().__init__()
@@ -46,8 +68,13 @@ class InferenceManager(QObject):
         self.process = None
 
         self._stdout_buffer = ""
+        self._stderr_buffer = ""
+        self._stderr_decoder = None
         self._processed = 0
         self._total = 0
+        self._errors = []
+        self._fatal = None
+        self._worker_pid = None
 
         # Coalesce UI updates coming from many images
         self._ui_refresh_timer = QTimer(self)
@@ -58,7 +85,8 @@ class InferenceManager(QObject):
         self._need_stats_refresh = False
         self._need_class_dropdown_refresh = False
 
-    def run_inference(self, model_path, image_files, conf, dims, sam_variant_key=None):
+    def run_inference(self, model_path, image_files, conf, dims, sam_variant_key=None,
+                      hires_params=None):
         if not image_files:
             logger.warning("Inference requested with no image files; ignoring")
             return
@@ -74,10 +102,17 @@ class InferenceManager(QObject):
             "dims": list(dims),
             "sam_variant_key": sam_variant_key,
         }
+        if hires_params is not None:
+            request["hires"] = hires_params
 
         self._stdout_buffer = ""
+        self._stderr_buffer = ""
+        # Incremental: a multi-byte UTF-8 character may be split across reads.
+        self._stderr_decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         self._processed = 0
         self._total = len(image_files)
+        self._errors = []
+        self._fatal = None
 
         program, arguments = _worker_command()
         self.process = QProcess(self)
@@ -85,6 +120,8 @@ class InferenceManager(QObject):
         self.process.setArguments(arguments)
         self.process.setProcessEnvironment(_worker_process_environment())
         self.process.readyReadStandardOutput.connect(self._on_stdout)
+        # The worker's stderr is its human-readable log ("Show log").
+        self.process.readyReadStandardError.connect(self._on_stderr)
         self.process.finished.connect(self._on_finished)
         self.process.errorOccurred.connect(self._on_process_error)
         self.process.started.connect(self._on_process_started)
@@ -96,8 +133,9 @@ class InferenceManager(QObject):
             display_text=self.display_text,
         )
 
-        logger.info("Starting %s inference subprocess: model=%s, %d image(s), conf=%.2f, dims=%s, sam_variant=%s",
-                    self.mode, model_path, self._total, conf, dims, sam_variant_key)
+        logger.info("Starting %s inference subprocess: model=%s, %d image(s), conf=%.2f, dims=%s, "
+                    "sam_variant=%s, hires=%s",
+                    self.mode, model_path, self._total, conf, dims, sam_variant_key, hires_params)
 
         self.process.start()
         # QProcess buffers writes until the process is actually running.
@@ -110,6 +148,8 @@ class InferenceManager(QObject):
         can never starve the GUI process of CPU time on low-core machines."""
         if self.process is None:
             return
+        # Remembered for cleanup: processId() is 0 once the process has ended.
+        self._worker_pid = self.process.processId()
         try:
             proc = psutil.Process(self.process.processId())
             if hasattr(psutil, "BELOW_NORMAL_PRIORITY_CLASS"):
@@ -126,14 +166,18 @@ class InferenceManager(QObject):
         the bounded wait below is just long enough for the OS to reap it,
         not for the current image to finish."""
         if self.process is not None:
+            logger.info("Inference cancelled")
             process, self.process = self.process, None
             process.readyReadStandardOutput.disconnect(self._on_stdout)
+            process.readyReadStandardError.disconnect(self._on_stderr)
             process.finished.disconnect(self._on_finished)
             process.errorOccurred.disconnect(self._on_process_error)
+            pid = process.processId()
             if process.state() != QProcess.ProcessState.NotRunning:
                 process.kill()
                 process.waitForFinished(1000)
             process.deleteLater()
+            _remove_worker_temp_dirs(pid)
         if self.progress_manager:
             self.progress_manager.close()
             self.progress_manager = None
@@ -154,15 +198,41 @@ class InferenceManager(QObject):
             try:
                 message = json.loads(line)
             except json.JSONDecodeError:
-                logger.warning("Inference worker emitted a non-JSON line: %r", line)
+                self._append_log(line)  # stray output, not protocol: it belongs in the log
                 continue
             self._handle_message(message)
+
+    def _on_stderr(self):
+        if self.process is None:
+            return
+        self._stderr_buffer += self._stderr_decoder.decode(bytes(self.process.readAllStandardError()))
+        *lines, self._stderr_buffer = _LINE_BREAK.split(self._stderr_buffer)
+        for line in lines:
+            self._append_log(line)
+
+    def _append_log(self, line):
+        line = line.rstrip()
+        if line:
+            logger.debug("worker: %s", line)  # also kept in the app's log file
+        if self.progress_manager:
+            self.progress_manager.append_log(line)
+
+    def _flush_log(self):
+        """Last, unterminated piece of the worker's log (if any)."""
+        if self._stderr_decoder is not None:
+            self._stderr_buffer += self._stderr_decoder.decode(b"", final=True)
+        if self._stderr_buffer.strip():
+            self._append_log(self._stderr_buffer)
+        self._stderr_buffer = ""
 
     def _handle_message(self, message):
         if message.get("fatal"):
             logger.error("Inference worker failed: %s", message["fatal"])
-            QMessageBox.critical(self.parent, "Inference Failed", message["fatal"])
-            self.stop_inference()
+            # The worker exits right after this; _on_finished then reports it,
+            # by which time its log (with the traceback) has fully arrived.
+            self._fatal = message["fatal"]
+            process = self.process
+            QTimer.singleShot(_FATAL_EXIT_GRACE_MS, lambda: self._stop_if_still_running(process))
             return
 
         if message.get("done"):
@@ -181,9 +251,14 @@ class InferenceManager(QObject):
             # so without this the dialog looks frozen between results.
             if self.progress_manager:
                 name = os.path.basename(message.get("image", ""))
-                self.progress_manager.progress_dialog.setLabelText(
-                    f"{self.display_text}\nImage {self._processed + 1}/{self._total}: {name}"
-                )
+                text = f"{self.display_text}\nImage {self._processed + 1}/{self._total}: {name}"
+                if message.get("detail"):  # e.g. HiReS "Predicting tile 37/104"
+                    text += f"\n{message['detail']}"
+                self.progress_manager.progress_dialog.setLabelText(text)
+                fraction = message.get("fraction")  # progress within this image
+                if isinstance(fraction, (int, float)):
+                    self.progress_manager.update_progress(
+                        self._processed + min(max(float(fraction), 0.0), 1.0))
             return
 
         image_path = message.get("image")
@@ -192,6 +267,7 @@ class InferenceManager(QObject):
 
         if "error" in message:
             logger.warning("Inference failed for %s: %s", image_path, message["error"])
+            self._errors.append((os.path.basename(image_path), message["error"]))
         else:
             masks_xy = [np.array(m, dtype=np.float32) for m in message.get("masks", [])]
             class_names = message.get("classes", [])
@@ -221,27 +297,88 @@ class InferenceManager(QObject):
         self._ui_refresh_timer.start(60)
 
     def _do_ui_refresh(self):
-        if self._need_class_dropdown_refresh and hasattr(self.parent, "sidebar"):
-            self.parent.sidebar.populate_class_dropdown()
-        if self._need_overlay_refresh and hasattr(self.parent, "image_display"):
-            self.parent.image_display.refresh_masks()
-        if self._need_stats_refresh and hasattr(self.parent, "statistics") and self.parent.statistics.isVisible():
-            self.parent.statistics.refresh_plot()
+        # The docks exist as attributes from the start but stay None until
+        # File -> Annotations opens them, so check for None, not hasattr.
+        sidebar = getattr(self.parent, "sidebar", None)
+        image_display = getattr(self.parent, "image_display", None)
+        statistics = getattr(self.parent, "statistics", None)
+        annotations = getattr(self.parent, "annotations", None)
 
-        if hasattr(self.parent, "annotations") and self.parent.annotations.isVisible():
-            self.parent.annotations.refresh_table(delay_ms=80)
+        if self._need_class_dropdown_refresh and sidebar is not None:
+            sidebar.populate_class_dropdown()
+        if self._need_overlay_refresh and image_display is not None:
+            image_display.refresh_masks()
+        if self._need_stats_refresh and statistics is not None and statistics.isVisible():
+            statistics.refresh_plot()
+        if annotations is not None and annotations.isVisible():
+            annotations.refresh_table(delay_ms=80)
 
         self._need_class_dropdown_refresh = False
         self._need_overlay_refresh = False
         self._need_stats_refresh = False
 
+    def _stop_if_still_running(self, process):
+        """The worker reported a fatal error but did not exit: stop it.
+        Its finished signal then ends the run as usual."""
+        if self.process is process and process.state() != QProcess.ProcessState.NotRunning:
+            logger.warning("Inference worker did not exit after a fatal error; stopping it")
+            process.kill()
+
     def _on_finished(self, exit_code, exit_status):
-        if exit_code != 0:
+        process = self.process
+        if process is None:
+            return
+        # Qt delivers all remaining output before `finished`; only an
+        # unterminated last log line may still be pending.
+        self._flush_log()
+        self.process = None
+        process.deleteLater()
+        # A worker that crashed or was killed leaves its HiReS tiles behind.
+        _remove_worker_temp_dirs(self._worker_pid)
+
+        killed = exit_status == QProcess.ExitStatus.CrashExit  # exit_code is meaningless then
+        crashed = killed or exit_code != 0
+        if crashed:
             logger.warning("Inference worker exited with code %d (status=%s)", exit_code, exit_status)
         logger.info("Inference finished")
+
+        failed = len(self._errors)
+        done = self._processed - failed
+        if self._fatal:
+            first_line = self._fatal.strip().splitlines()[0] if self._fatal.strip() else self._fatal
+            summary = f"Inference failed: {first_line[:200]}"
+        elif crashed:
+            how = ("crashed or was killed (for example because the computer ran out of memory)"
+                   if killed else f"exited with error code {exit_code}")
+            summary = (f"The inference process {how} after {done} of {self._total} image(s).")
+        elif failed:
+            summary = f"Inference finished: {done} of {self._total} image(s) processed, {failed} failed."
+        else:
+            summary = f"Inference finished: {done} of {self._total} image(s) processed."
+
         if self.progress_manager:
-            self.progress_manager.close()
+            # On any problem keep the window up, so its log can show why.
+            self.progress_manager.finish(summary, keep_open=bool(self._fatal or crashed or failed))
             self.progress_manager = None
-        if self.process is not None:
-            self.process.deleteLater()
-            self.process = None
+
+        if self._fatal:
+            QMessageBox.critical(self.parent, "Inference Failed", self._fatal)
+        elif crashed:
+            QMessageBox.warning(
+                self.parent, "Inference",
+                f"{summary}\n\nThe masks of the images finished before that were saved. "
+                "'Show log' in the progress window shows the worker's last output.")
+        self._report_errors()
+
+    def _report_errors(self):
+        """Tell the user which images failed (they are otherwise only logged)."""
+        if not self._errors:
+            return
+        shown = "\n".join(f"• {name}: {error}" for name, error in self._errors[:10])
+        if len(self._errors) > 10:
+            shown += f"\n… and {len(self._errors) - 10} more (see the log file)"
+        QMessageBox.warning(
+            self.parent, "Inference",
+            f"{len(self._errors)} of {self._total} image(s) could not be processed:\n\n{shown}",
+        )
+        self._errors = []

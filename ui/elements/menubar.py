@@ -41,6 +41,7 @@ class MenuBar(QMenuBar):
 
         actions = [
             ("Import Images", self.parent.import_images),
+            ("Import Images with Annotations…", self.parent.import_images_with_annotations),
             ("Annotations", self.parent.show_results ), #self.parent.toggle_results_dock
             ("Save Results", self.parent.save_results_csv),
             ("Export annotations", self.parent._export_results), 

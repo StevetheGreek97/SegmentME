@@ -1,5 +1,6 @@
 from PyQt6.QtWidgets import (
-    QMainWindow, QWidget, QFileDialog, QHBoxLayout,QProgressDialog, QApplication, QVBoxLayout, QMessageBox
+    QMainWindow, QWidget, QFileDialog, QHBoxLayout,QProgressDialog, QApplication, QVBoxLayout, QMessageBox,
+    QDialog,
 )
 from PyQt6.QtCore import Qt, QEvent, pyqtSignal, QTimer, QThread
 from PyQt6.QtGui import QIcon
@@ -35,7 +36,11 @@ logger = get_logger(__name__)
 
 from datetime import datetime
 from core.save_res import SaveResultsDBWorker
+from core.config import ProjectConfigManager
+from core.importers.yolo_importer import ImportCancelled, ImportFailed, describe, run_import
+from ui.dialogs.import_dialog import ImportAnnotationsDialog, ImportReportDialog
 from services.seproj import update_images as seproj_update_images
+from services.seproj import update_classes as seproj_update_classes
 
 class MainApp(QMainWindow):
     image_changed = pyqtSignal(str, object)
@@ -129,6 +134,90 @@ class MainApp(QMainWindow):
             f"✅ Imported {imported_count} images into your project."
         )
 
+    def import_images_with_annotations(self):
+        """
+        File > Import Images with Annotations: images plus YOLO polygon .txt
+        files and the dataset's data.yaml (see core/importers/yolo_importer.py).
+        A review window shows what will happen first; the import itself is
+        all or nothing.
+        """
+        project_root = Path(self.state_manager.project_root)
+        # An empty project never got these from initialize_project.
+        if getattr(self, "config", None) is None:
+            self.config = ProjectConfigManager(project_root)
+        if getattr(self, "project_root", None) is None:
+            self.project_root = str(project_root)
+        images_dir = Path(self.config.get_images_dir())
+
+        folder = QFileDialog.getExistingDirectory(
+            self, "Choose the dataset folder (images + .txt annotations)", str(Path.home()))
+        if not folder:
+            return
+        if Path(folder).resolve() in (images_dir.resolve(), project_root.resolve()):
+            QMessageBox.information(
+                self, "Import Images with Annotations",
+                "That is this project's own folder. Choose the folder of the dataset "
+                "you want to bring in.")
+            return
+
+        project_images = [os.path.basename(p) for p in (loader(images_dir) or [])]
+        existing_classes = {row[1]: row[2] for row in self.state_manager.class_manager.list_classes()}
+        dialog = ImportAnnotationsDialog(self, folder, project_images, existing_classes)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        scan, targets = dialog.scan_result, dialog.class_targets()
+
+        progress = QProgressDialog("Importing images…", "Cancel", 0, len(scan.to_import), self)
+        progress.setWindowTitle("Import Images with Annotations")
+        progress.setWindowModality(Qt.WindowModality.ApplicationModal)
+        progress.setMinimumDuration(0)
+
+        def report(done, total, name):
+            progress.setValue(done)
+            if name:
+                progress.setLabelText(f"Copying {name} ({done + 1}/{total})")
+            QApplication.processEvents()
+            return not progress.wasCanceled()
+
+        try:
+            result = run_import(scan, targets, existing_classes, self.state_manager.db,
+                                images_dir, report)
+        except ImportCancelled:
+            QMessageBox.information(self, "Import cancelled", "Nothing was imported.")
+            return
+        except ImportFailed as exc:
+            QMessageBox.warning(self, "Import failed", f"{exc}\n\nNothing was imported.")
+            return
+        except Exception as exc:
+            logger.exception("Import from %s failed", folder)
+            QMessageBox.critical(self, "Import failed", f"{exc}\n\nNothing was imported.")
+            return
+        finally:
+            progress.close()
+
+        self._reload_after_import(images_dir)
+        text = describe(scan, result)
+        logger.info("Import report for %s:\n%s", folder, text)
+        ImportReportDialog(self, text, save_dir=self.project_root).exec()
+
+    def _reload_after_import(self, images_dir):
+        """Show the imported images and classes; keep the current image."""
+        current = self.state_manager.current_image_path
+        image_paths = loader(images_dir) or []
+        self.state_manager.set_image_paths(image_paths)
+        if current in image_paths:
+            self.state_manager.image_index = image_paths.index(current)
+        self.slider.set_image_count(len(image_paths))
+        if current is None and image_paths:  # the project had no images yet
+            self.image_display.display_image(self.state_manager.current_image_path)
+            QTimer.singleShot(0, self.image_display.fit_to_view)
+
+        seproj_update_images(self.project_root, [os.path.basename(p) for p in image_paths])
+        rows = self.state_manager.class_manager.list_classes()
+        seproj_update_classes(self.project_root, [{"name": r[1], "color": r[2]} for r in rows])
+        self.sidebar.populate_class_dropdown()
+        self.state_manager.masks_updated.emit()
+
     def next_image(self):
         path_ = self.state_manager.next_image()
         if path_:
@@ -168,6 +257,8 @@ class MainApp(QMainWindow):
             threshold = dialog.get_threshold()
             img_dim = dialog.get_image_dimensions()
             sam_variant_key = None
+            # HiReS = the selected YOLO model run tile by tile (see the worker).
+            hires_params = dialog.get_hires_params() if mode == "hires" else None
 
             if mode == "sam":
                 sam_variant_key = dialog.get_sam_variant_key()
@@ -207,6 +298,7 @@ class MainApp(QMainWindow):
                 threshold,
                 img_dim,
                 sam_variant_key=sam_variant_key,
+                hires_params=hires_params,
             )
 
     # ---------- Docks / Results ----------

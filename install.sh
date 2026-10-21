@@ -59,6 +59,9 @@ python3 -c "import zipfile,sys; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv
 touch "$DEXTR_TMP"/DEXTR-SMe-*/src/DEXTR/__init__.py
 pip install --quiet --no-cache-dir "$DEXTR_TMP"/DEXTR-SMe-*/
 rm -rf "$DEXTR_TMP"
+# HiReS (tiled YOLO inference). --no-deps: it declares numpy>=2, but SegmentME
+# is pinned to numpy<2 for SAM3; the parts SegmentME uses work with numpy 1.26.
+pip install --quiet --no-cache-dir --no-deps "hireseg==1.2.0"
 
 # Model checkpoints live in models/ next to the app (see services/model_store.py).
 # Only SAM2 Tiny is fetched here; everything else can be downloaded from

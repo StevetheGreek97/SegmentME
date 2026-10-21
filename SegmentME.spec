@@ -117,6 +117,11 @@ if _installed("torchvision"):
 
 # The app's own worker entry points, dispatched from main.py.
 hiddenimports += ["core.inference_worker", "core.trainer.training_worker"]
+# HiReS modules the inference worker imports lazily (listed explicitly so a
+# refactor to dynamic imports can't silently drop them from the bundle).
+if _installed("hires"):
+    hiddenimports += ["hires.processing.chunker", "hires.processing.predictor",
+                      "hires.models.collection", "hires.operations.ops"]
 
 # CUDA torch on Linux loads the CUDA runtime from separate nvidia-* wheels
 # (on Windows the DLLs sit inside torch/lib and the torch hook collects them).

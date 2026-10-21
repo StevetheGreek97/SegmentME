@@ -13,3 +13,5 @@ ultralytics==8.3.167
 # SAM3 — installed separately (git+https://github.com/facebookresearch/sam3.git + einops + pycocotools);
 #        checkpoint sam2_configs/sam3.pt is gated on https://huggingface.co/facebook/sam3
 # DEXTR  — installed separately in Dockerfile from vendor/
+# HiReS  — hireseg==1.2.0, installed separately with --no-deps (it declares numpy>=2,
+#          which conflicts with the numpy<2 pin above); see install.sh / build.py

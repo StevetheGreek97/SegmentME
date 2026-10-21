@@ -75,6 +75,7 @@ TORCH_INDEX = {
 SAM2_ARCHIVE = "https://github.com/facebookresearch/sam2/archive/refs/heads/main.zip"
 SAM3_ARCHIVE = "https://github.com/facebookresearch/sam3/archive/refs/heads/main.zip"
 DEXTR_ARCHIVE = "https://github.com/StevetheGreek97/DEXTR-SMe/archive/refs/heads/master.zip"
+HIRES_PACKAGE = "hireseg==1.2.0"
 
 
 def run(cmd, **kwargs):
@@ -108,6 +109,9 @@ def create_env(flavor, env_dir):
     run(pip + [SAM2_ARCHIVE], env=dict(os.environ, SAM2_BUILD_CUDA="0"))
     run(pip + [SAM3_ARCHIVE, "einops", "pycocotools"])
     install_dextr(pip)
+    # HiReS (tiled YOLO inference). --no-deps: it declares numpy>=2, but the
+    # app is pinned to numpy<2 for SAM3; the parts it uses work with numpy 1.26.
+    run(pip + ["--no-deps", HIRES_PACKAGE])
     return python
 
 

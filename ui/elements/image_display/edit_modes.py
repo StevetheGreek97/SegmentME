@@ -243,6 +243,7 @@ class BrushEditMode(MaskEditMode):
         super().__init__(display, mask_id)
         self.radius = BrushEditMode._last_radius
         self._bitmap = None              # np.uint8 working raster of the mask
+        self._box = None                 # [x0, y0, x1, y1]: the bitmap is 0 outside it
         self._class = None
         self._value = None               # 255 while painting, 0 while erasing
         self._last = None                # last stamp point (gap-free strokes)
@@ -264,7 +265,10 @@ class BrushEditMode(MaskEditMode):
 
         h, w = image.shape[:2]
         self._bitmap = np.zeros((h, w), dtype=np.uint8)
-        cv2.fillPoly(self._bitmap, [poly.astype(np.int32)], 255)
+        poly = poly.astype(np.int32)
+        cv2.fillPoly(self._bitmap, [poly], 255)
+        x, y, bw, bh = cv2.boundingRect(poly)
+        self._box = [x, y, x + bw, y + bh]
 
         # Hide this mask's baked fill so erased areas read correctly
         display = self.display
@@ -284,9 +288,8 @@ class BrushEditMode(MaskEditMode):
             self.display.scene.removeItem(self._cursor_item)
             self._cursor_item = None
         # Clear the working overlay and restore the normal base render
-        if self.display._hl_img is not None:
-            self.display._hl_img.fill(0)
-            self.display.highlight_item.setPixmap(QPixmap.fromImage(self.display._hl_img))
+        self.display.highlight_item.setPixmap(QPixmap())
+        self.display.highlight_item.setOffset(0, 0)
         self.display.refresh_masks()
 
     # ------- events -------
@@ -336,26 +339,55 @@ class BrushEditMode(MaskEditMode):
     def _stamp(self, point):
         """Stamp a filled circle; connect to the previous stamp so fast drags leave no gaps."""
         cv2.circle(self._bitmap, point, self.radius, self._value, -1)
+        drawn_around = [point]
         if self._last is not None and self._last != point:
             cv2.line(self._bitmap, self._last, point, self._value,
                      thickness=max(1, self.radius * 2))
+            drawn_around.append(self._last)
         self._last = point
+        # Grow the box over what was just drawn: everything lies within the
+        # radius (+1 px for rounding) of the stamp and of the line's ends --
+        # at the current radius, which scrolling may have changed mid-stroke.
+        reach = self.radius + 1
+        x0, y0, x1, y1 = self._box
+        for px, py in drawn_around:
+            x0, y0 = min(x0, px - reach), min(y0, py - reach)
+            x1, y1 = max(x1, px + reach + 1), max(y1, py + reach + 1)
+        self._box = [x0, y0, x1, y1]
         if not self._timer.isActive():
             self._timer.start()
 
+    def _working_box(self):
+        """The part of the bitmap that can be non-zero, plus a 2 px margin
+        (room for the outline), clipped to the image: (x0, y0, x1, y1)."""
+        h, w = self._bitmap.shape
+        x0, y0, x1, y1 = self._box
+        return max(x0 - 2, 0), max(y0 - 2, 0), min(x1 + 2, w), min(y1 + 2, h)
+
     def _refresh_overlay(self):
-        """Render the working bitmap as a translucent fill + white outline."""
+        """Render the working bitmap as a translucent fill + white outline.
+
+        Only the box around the mask and the strokes is rendered (placed with
+        setOffset), so a refresh stays cheap however large the image is.
+        """
         if self._bitmap is None:
             return
+        item = self.display.highlight_item
+        x0, y0, x1, y1 = self._working_box()
+        if x1 <= x0 or y1 <= y0:
+            item.setPixmap(QPixmap())
+            return
+        bitmap = self._bitmap[y0:y1, x0:x1]
         color = self.state.class_manager.get_class_color(self._class)
-        h, w = self._bitmap.shape
+        h, w = bitmap.shape
         rgba = np.zeros((h, w, 4), dtype=np.uint8)
-        rgba[self._bitmap > 0] = (color.red(), color.green(), color.blue(), 120)
-        edges = cv2.morphologyEx(self._bitmap, cv2.MORPH_GRADIENT,
+        rgba[bitmap > 0] = (color.red(), color.green(), color.blue(), 120)
+        edges = cv2.morphologyEx(bitmap, cv2.MORPH_GRADIENT,
                                  np.ones((3, 3), np.uint8)) > 0
         rgba[edges] = (255, 255, 255, 230)
         qimg = QImage(rgba.data, w, h, 4 * w, QImage.Format.Format_RGBA8888)
-        self.display.highlight_item.setPixmap(QPixmap.fromImage(qimg.copy()))
+        item.setPixmap(QPixmap.fromImage(qimg.copy()))
+        item.setOffset(x0, y0)
 
     def _move_cursor(self, point):
         r = self.radius
@@ -367,9 +399,12 @@ class BrushEditMode(MaskEditMode):
 
     def _commit(self):
         """Re-contour the working bitmap and replace the original mask with the result."""
-        bitmap, mask_id = self._bitmap, self.mask_id
+        mask_id = self.mask_id
+        x0, y0, x1, y1 = self._working_box()  # everything outside it is 0
+        bitmap = np.ascontiguousarray(self._bitmap[y0:y1, x0:x1])
 
-        contours, _ = cv2.findContours(bitmap, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        contours, _ = cv2.findContours(bitmap, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE,
+                                       offset=(x0, y0))
         pieces = [c.squeeze(axis=1).astype(np.float32) for c in contours
                   if c.shape[0] >= 3 and cv2.contourArea(c) > 10]
 

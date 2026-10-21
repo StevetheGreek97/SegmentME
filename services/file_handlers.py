@@ -13,7 +13,7 @@ def loader(folder_path):
         image_paths = []
         for f in os.listdir(folder_path):
             joined = os.path.join(folder_path, f)
-            if joined.endswith(valid_extensions):
+            if joined.lower().endswith(valid_extensions):  # IMG_01.JPG, scan.TIF too
                 image_paths.append(joined)
         return image_paths
     else:

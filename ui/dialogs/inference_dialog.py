@@ -5,7 +5,7 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QGroupBox, QFormLayout, QLabel, QDoubleSpinBox,
     QFileDialog, QComboBox, QSpinBox, QDialogButtonBox,
-    QHBoxLayout, QCheckBox
+    QHBoxLayout, QCheckBox, QMessageBox
 )
 
 from core.tools import sam_registry
@@ -39,9 +39,12 @@ class InferenceDialog(QDialog):
 
         self.model_type_selector = QComboBox()
         self.model_type_selector.addItem("YOLO", "yolo")
+        self.model_type_selector.addItem("HiReS (tiled YOLO for large images)", "hires")
         self.model_type_selector.addItem("SAM (auto-segment every object)", "sam")
         self.model_type_selector.setToolTip(
             "YOLO runs your trained detection/segmentation model.\n"
+            "HiReS runs the same YOLO model on overlapping tiles of each image\n"
+            "and merges the results, for high-resolution scans.\n"
             "SAM auto-segments every object in each image (SAM2/2.1 only)."
         )
         self.model_type_selector.currentIndexChanged.connect(self._on_model_type_changed)
@@ -146,9 +149,15 @@ class InferenceDialog(QDialog):
         dims_col.addWidget(self.lock_aspect)
 
         params_form.addRow("Image size:", dims_col)
+        self._params_form = params_form
+        self._dims_row_index = params_form.rowCount() - 1
 
         params_box.setLayout(params_form)
         root.addWidget(params_box)
+
+        # --- HiReS group (only for the HiReS model type) ---------------------
+        self.hires_box = self._build_hires_box()
+        root.addWidget(self.hires_box)
 
         # --- Buttons ---------------------------------------------------------
         self.buttons = QDialogButtonBox(
@@ -163,6 +172,89 @@ class InferenceDialog(QDialog):
 
         # Focus the model selector first for smooth UX
         self.model_selector.setFocus()
+
+    # ------------------------ HiReS -----------------------------------------
+    def _build_hires_box(self):
+        """Tiling / merging parameters, defaults as in the hires CLI."""
+        box = QGroupBox("HiReS tiling")
+        form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+
+        def spin(lo, hi, value, suffix="", tip=""):
+            s = QSpinBox()
+            s.setRange(lo, hi)
+            s.setValue(value)
+            s.setSuffix(suffix)
+            s.setToolTip(tip)
+            return s
+
+        def dspin(lo, hi, value, step, decimals, tip):
+            s = QDoubleSpinBox()
+            s.setRange(lo, hi)
+            s.setDecimals(decimals)
+            s.setSingleStep(step)
+            s.setValue(value)
+            s.setToolTip(tip)
+            return s
+
+        self.hires_tile_w = spin(64, 16384, 1024, " px", "Tile width in pixels.")
+        self.hires_tile_h = spin(64, 16384, 1024, " px",
+                                 "Tile height in pixels. Images must be taller than one tile.")
+        tile_row = QHBoxLayout()
+        tile_row.setSpacing(8)
+        tile_row.addWidget(self.hires_tile_w, 1)
+        tile_row.addWidget(self.hires_tile_h, 1)
+        form.addRow("Tile size:", tile_row)
+
+        self.hires_overlap = spin(0, 8192, 150, " px",
+                                  "Overlap between neighbouring tiles. Should be larger than\n"
+                                  "the biggest object, so every object is whole in some tile.")
+        form.addRow("Overlap:", self.hires_overlap)
+
+        self.hires_imgsz = spin(32, 8192, 1024, " px",
+                                "Size YOLO resizes each tile to (ultralytics 'imgsz').")
+        form.addRow("Inference size:", self.hires_imgsz)
+
+        self.hires_edge = dspin(0.0, 0.2, 0.01, 0.005, 3,
+                                "Drop polygons within this fraction of a tile's border\n"
+                                "(cut-off objects), and of the image border after merging.")
+        form.addRow("Edge filter:", self.hires_edge)
+
+        self.hires_iou = dspin(0.05, 1.0, 0.7, 0.05, 2,
+                               "Polygons from overlapping tiles with IoU above this\n"
+                               "are duplicates; the higher-confidence one is kept.")
+        form.addRow("NMS IoU:", self.hires_iou)
+
+        hint = QLabel("Uses the YOLO model selected above. Masks are added to the "
+                      "existing ones; nothing is deleted.")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #666; font-size: 11px;")
+        form.addRow(hint)
+
+        box.setLayout(form)
+        return box
+
+    def get_hires_params(self):
+        """HiReS parameters as sent to the inference worker."""
+        return {
+            "chunk_size": [int(self.hires_tile_w.value()), int(self.hires_tile_h.value())],
+            "overlap": int(self.hires_overlap.value()),
+            "imgsz": int(self.hires_imgsz.value()),
+            "edge_threshold": float(self.hires_edge.value()),
+            "iou_thresh": float(self.hires_iou.value()),
+        }
+
+    def accept(self):
+        if self.get_mode() == "hires":
+            smallest = min(self.hires_tile_w.value(), self.hires_tile_h.value())
+            if self.hires_overlap.value() >= smallest:
+                QMessageBox.warning(
+                    self, "Run Inference",
+                    f"The overlap ({self.hires_overlap.value()} px) must be smaller "
+                    f"than the tile size ({self.hires_tile_w.value()} x "
+                    f"{self.hires_tile_h.value()} px).")
+                return
+        super().accept()
 
     # ------------------------ helpers ---------------------------------------
     def populate_models(self):
@@ -213,7 +305,9 @@ class InferenceDialog(QDialog):
             self.sam_variant_selector.setCurrentIndex(0)
 
     def _on_model_type_changed(self, _index):
-        is_sam = self.get_mode() == "sam"
+        mode = self.get_mode()
+        is_sam = mode == "sam"
+        is_hires = mode == "hires"
 
         self.model_selector.setVisible(not is_sam)
         for i in range(self.yolo_row.count()):
@@ -224,6 +318,10 @@ class InferenceDialog(QDialog):
 
         # SAM auto-segmentation has no confidence knob.
         self.conf_spinbox.setEnabled(not is_sam)
+        # HiReS has its own per-tile inference size instead of width x height.
+        self._params_form.setRowVisible(self._dims_row_index, not is_hires)
+        self.hires_box.setVisible(is_hires)
+        self.adjustSize()
 
     def _handle_yolo_selection(self, index):
         if self.model_selector.itemData(index) != _YOLO_BROWSE_DATA:
