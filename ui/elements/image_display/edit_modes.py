@@ -42,9 +42,7 @@ class MaskEditMode:
         return self.display._mask_index.get(self.mask_id)
 
     def mask_class(self) -> str:
-        row = self.state.db.fetch_one(
-            "SELECT class_name FROM masks WHERE id = ?", (int(self.mask_id),))
-        return row[0] if row else "object"
+        return self.state.mask_manager.class_of(self.mask_id) or "object"
 
     def replace_mask(self, pieces):
         """Save `pieces` (list of Nx2 float32 polygons) and delete the original mask."""
@@ -274,7 +272,7 @@ class BrushEditMode(MaskEditMode):
         display = self.display
         display.cached_image_with_masks = display.overlay_base_masks(
             image, exclude_ids={int(self.mask_id)})
-        display._set_base_pixmap(display.cached_image_with_masks)
+        display.renderer.show(display.cached_image_with_masks)
 
         self._refresh_overlay()
         logger.info("Brush mode armed for mask %s (left-drag paints, right-drag erases, "

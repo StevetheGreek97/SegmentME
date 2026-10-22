@@ -1,130 +1,16 @@
+"""Training progress window: loss and score plots (from results.csv,
+checked every 10 s) and the training log, with a Stop button."""
+import os
 
-from PyQt6.QtWidgets import QDialog, QVBoxLayout, QTextEdit, QPushButton
+import pandas as pd
 import pyqtgraph as pg
+from PyQt6.QtCore import QTimer
+from PyQt6.QtWidgets import QDialog, QVBoxLayout, QPushButton, QTextEdit
 
 from services.logger import get_logger
 
 logger = get_logger(__name__)
 
-class TrainingMonitorCMD(QDialog):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.thread = None
-        self.setWindowTitle("📉 Training Monitor")
-        self.setMinimumSize(600, 400)
-
-        self.text_area = QTextEdit()
-        self.text_area.setReadOnly(True)
-
-        self.stop_btn = QPushButton("🛑 Stop Training")
-        self.stop_btn.clicked.connect(self._on_stop)
-
-        layout = QVBoxLayout(self)
-        layout.addWidget(self.text_area)
-        layout.addWidget(self.stop_btn)
-
-        self._stop_requested = False
-        self.stop_callback = None
-
-    def append_log(self, message):
-        self.text_area.append(message)
-
-    def _on_stop(self):
-        self._stop_requested = True
-        if self.stop_callback:
-            self.stop_callback()
-        self.append_log("Training stopped by user.")
-
-    def set_stop_callback(self, callback):
-        self.stop_callback = callback
-
-    # training_monitor.py
-    def closeEvent(self, event):
-        """
-        When user presses 'X'. Stop training and hide dialog safely.
-        """
-        if not self._stop_requested:
-            self._on_stop()
-
-        self.hide()
-        event.ignore()  # Do not destroy the dialog yet
-
-        
-    def set_thread(self, thread):
-        self.thread = thread
-
-
-
-
-
-class TrainingMonitorcmd(QDialog):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("📉 Training Monitor")
-        self.setMinimumSize(800, 500)
-
-        self.plot_widget = pg.PlotWidget(title="Training Metrics")
-        self.plot_widget.addLegend()
-        self.plot_widget.setLabel('left', 'Loss')
-        self.plot_widget.setLabel('bottom', 'Epoch')
-        self.plot_widget.showGrid(x=True, y=True)
-
-        self.stop_btn = QPushButton("🛑 Stop Training")
-        self.stop_btn.clicked.connect(self._on_stop)
-
-        layout = QVBoxLayout(self)
-        layout.addWidget(self.plot_widget)
-        layout.addWidget(self.stop_btn)
-
-        self._stop_requested = False
-        self.stop_callback = None
-
-        # Curves for each metric
-        self.epoch_data = []
-        self.metrics = {
-            'box_loss': {'curve': pg.PlotDataItem(pen='r'), 'data': []},
-            'seg_loss': {'curve': pg.PlotDataItem(pen='g'), 'data': []},
-            'cls_loss': {'curve': pg.PlotDataItem(pen='b'), 'data': []},
-            'dfl_loss': {'curve': pg.PlotDataItem(pen='y'), 'data': []},
-        }
-
-        for metric in self.metrics.values():
-            self.plot_widget.addItem(metric['curve'])
-
-    def update_metrics(self, epoch, box_loss, seg_loss, cls_loss, dfl_loss):
-        self.epoch_data.append(epoch)
-        self.metrics['box_loss']['data'].append(box_loss)
-        self.metrics['seg_loss']['data'].append(seg_loss)
-        self.metrics['cls_loss']['data'].append(cls_loss)
-        self.metrics['dfl_loss']['data'].append(dfl_loss)
-
-        for name, metric in self.metrics.items():
-            metric['curve'].setData(self.epoch_data, metric['data'])
-
-    def _on_stop(self):
-        self._stop_requested = True
-        if self.stop_callback:
-            self.stop_callback()
-
-    def set_stop_callback(self, callback):
-        self.stop_callback = callback
-
-    def closeEvent(self, event):
-        if not self._stop_requested:
-            self._on_stop()
-        self.hide()
-        event.ignore()
-
-    def set_thread(self, thread):
-        self.thread = thread
-
-
-
-import os
-import pandas as pd
-from PyQt6.QtWidgets import QDialog, QVBoxLayout, QPushButton, QTextEdit
-from PyQt6.QtCore import QTimer
-import pyqtgraph as pg
 
 class TrainingMonitor(QDialog):
     def __init__(self):

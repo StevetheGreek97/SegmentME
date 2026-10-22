@@ -28,6 +28,8 @@ from services.logger import get_logger
 logger = get_logger(__name__)
 
 _OK, _WARN, _BAD = "#2e7d32", "#e65100", "#c62828"
+_CHOOSE_FOLDER = ("Choose the folder with the .txt annotations: <b>Browse…</b> next to "
+                  "“Annotations folder”. Then choose the data.yaml if it isn't found there.")
 
 
 def _swatch(color_hex: str) -> QIcon:
@@ -43,7 +45,8 @@ class ImportAnnotationsDialog(QDialog):
 
     def __init__(self, parent, folder, project_images, existing_classes, existing_masks=None):
         """
-        folder: the folder with the .txt files, chosen by the user.
+        folder: the folder with the .txt files, or None to let the user
+            choose it with Browse… (the dialog then opens empty).
         project_images: paths of the images in the project.
         existing_classes: project class name -> colour (hex).
         existing_masks: image name (stem) -> number of masks it already has.
@@ -136,7 +139,13 @@ class ImportAnnotationsDialog(QDialog):
         layout.addLayout(buttons)
         self.resize(860, 600)
 
-        self._set_folder(folder)
+        self.folder_edit.setPlaceholderText("Choose the folder with the .txt annotations (Browse…)")
+        if folder:
+            self._set_folder(folder)
+        else:
+            self._show_hint(_CHOOSE_FOLDER)
+            folder_btn.setDefault(True)
+            folder_btn.setFocus()
 
     # ------------------------------------------------------------- inputs
     def _set_folder(self, folder):
@@ -149,12 +158,12 @@ class ImportAnnotationsDialog(QDialog):
 
     def _choose_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "Folder with the .txt annotations",
-                                                  str(self._folder or ""))
+                                                  str(self._folder or Path.home()))
         if folder:
             self._set_folder(folder)
 
     def _choose_yaml(self):
-        start = str(self._yaml_path.parent if self._yaml_path else self._folder or "")
+        start = str(self._yaml_path.parent if self._yaml_path else self._folder or Path.home())
         path, _ = QFileDialog.getOpenFileName(self, "Dataset data.yaml", start,
                                               "Dataset config (*.yaml *.yml)")
         if path:
@@ -170,6 +179,9 @@ class ImportAnnotationsDialog(QDialog):
         self.details.clear()
         self.yaml_edit.setText(str(self._yaml_path) if self._yaml_path else "")
 
+        if self._folder is None:
+            self._show_hint(_CHOOSE_FOLDER)
+            return
         if self._yaml_path is None:
             self._show_problem("Choose the dataset's data.yaml: it gives the name of each class number.")
             return
@@ -207,6 +219,9 @@ class ImportAnnotationsDialog(QDialog):
         self._show_summary(scan)
         self._fill_class_table(scan)
         self.details.setPlainText(describe(scan) or "Nothing to report.")
+
+    def _show_hint(self, text):
+        self.summary.setText(text)
 
     def _show_problem(self, text):
         self.summary.setText(f"<span style='color:{_BAD}'>{text}</span>")

@@ -15,6 +15,10 @@ from PyQt6.QtWidgets import (
     QComboBox, QCompleter, QHBoxLayout, QLabel, QLineEdit, QSlider, QVBoxLayout, QWidget,
 )
 
+from services.logger import get_logger
+
+logger = get_logger(__name__)
+
 
 class ImageSlider(QWidget):
     LOAD_DELAY_MS = 150   # wait for the slider to settle before loading a (big) image
@@ -131,10 +135,12 @@ class ImageSlider(QWidget):
         self.timer.start(self.LOAD_DELAY_MS)
 
     def update_image(self):
-        """Load the image at the slider position."""
-        if self._state.image_paths:
-            self._state.image_index = self.slider.value()
-            self.parent.image_display.display_image(self._state.current_image_path)
+        """Load the image at the slider position -- as Next/Previous do:
+        drop the drawing tool's unfinished points, show the image, and tell
+        the rest of the app (annotations table, statistics) that it changed."""
+        if not self._state.image_paths:
+            return
+        self.parent.go_to_image(self.slider.value())
 
     def update_slider(self, image_path):
         """The image changed elsewhere (next/previous, import): follow it."""

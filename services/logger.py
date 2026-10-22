@@ -46,6 +46,9 @@ class _NullStream:
 
 
 def _log_dir() -> Path:
+    override = os.getenv("SEGMENTME_LOG_DIR")   # e.g. the test suite's own folder
+    if override:
+        return Path(override)
     if platform.system() == "Windows":
         base = Path(os.getenv("APPDATA", Path.home() / "AppData" / "Roaming"))
         return base / "segmentme" / "logs"
@@ -105,7 +108,7 @@ def get_logger(name: str | None = None) -> logging.Logger:
     return logging.getLogger(f"{APP_LOGGER_NAME}.{name}")
 
 
-# Back-compat: modules that still do `from services.logger import logger`
+# The app's own logger (log_memory_usage below)
 logger = _configure()
 
 

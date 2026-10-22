@@ -18,7 +18,7 @@ class MaskDatabaseManager:
         """
         Initialize with a shared database connection.
         """
-        self.db = db_connection  # ✅ Shared DatabaseConnection instance
+        self.db = db_connection
         self.parent = parent  # Store the parent reference for signal emissions
 
     def save_mask(self, mask, image_name, class_name="Object"):
@@ -80,6 +80,15 @@ class MaskDatabaseManager:
             (new_class_name, image_name, mask_id)
         )
         self.parent.masks_updated.emit()
+    def assign_class(self, rows, new_class):
+        """Give the masks [(image_name, mask_id), ...] the class new_class,
+        in one transaction and with one masks_updated."""
+        with self.db.transaction():
+            self.db.executemany(
+                "UPDATE masks SET class_name = ? WHERE image_name = ? AND id = ?",
+                [(new_class, image_name, mask_id) for image_name, mask_id in rows])
+        self.parent.masks_updated.emit()
+
     def reindex_masks(self):
         """
         Reindex mask IDs to remove gaps after deletions.
@@ -162,3 +171,43 @@ class MaskDatabaseManager:
         """
         result = self.db.fetch_one("SELECT COUNT(*) FROM masks WHERE class_name = ?", (class_name,))
         return result[0] if result else 0
+
+    # ------------------------------------------------------------ questions
+    def count(self) -> int:
+        """Number of masks in the project."""
+        return self.db.fetch_one("SELECT COUNT(*) FROM masks")[0]
+
+    def class_of(self, mask_id):
+        """Class name of a mask, or None if there is no such mask."""
+        row = self.db.fetch_one("SELECT class_name FROM masks WHERE id = ?", (int(mask_id),))
+        return row[0] if row else None
+
+    def counts_by_class(self, image_name=None):
+        """[(class name, number of masks), ...] for the project or one image."""
+        if image_name is None:
+            return self.db.fetch_all("SELECT class_name, COUNT(*) FROM masks GROUP BY class_name")
+        return self.db.fetch_all("SELECT class_name, COUNT(*) FROM masks WHERE image_name = ? "
+                                 "GROUP BY class_name", (image_name,))
+
+    def counts_per_image(self) -> dict:
+        """Image name -> number of masks (images with masks only)."""
+        return dict(self.db.fetch_all("SELECT image_name, COUNT(*) FROM masks GROUP BY image_name"))
+
+    def image_names_with_masks(self) -> set:
+        return {row[0] for row in self.db.fetch_all("SELECT DISTINCT image_name FROM masks")}
+
+    def fingerprint(self, image_name):
+        """(count, largest id, sum of ids) of an image's masks: changes when
+        masks are added or removed (used to tell if a picture is outdated)."""
+        return self.db.fetch_one("SELECT COUNT(*), MAX(id), TOTAL(id) FROM masks WHERE image_name = ?",
+                                 (image_name,))
+
+    def delete_for_images(self, image_names, chunk=500):
+        """Delete every mask of these images, in one transaction."""
+        image_names = list(image_names)
+        with self.db.transaction():
+            for i in range(0, len(image_names), chunk):
+                part = image_names[i:i + chunk]
+                self.db.execute_query(
+                    f"DELETE FROM masks WHERE image_name IN ({','.join('?' * len(part))})", part)
+        self.parent.masks_updated.emit()

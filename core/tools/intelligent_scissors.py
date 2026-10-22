@@ -1,41 +1,55 @@
+"""Intelligent Scissors: click seed points along an object's edge; the path
+between them follows the image's edges (A* over an edge map at half
+resolution). The mouse shows the path to the next seed. S saves."""
+import heapq
+
 import cv2
 import numpy as np
-import heapq
-from PyQt6.QtCore import pyqtSignal,QObject, QPointF, QRectF, QTimer
+from PyQt6.QtCore import QPointF, QRectF, QTimer
 from PyQt6.QtGui import QPolygonF, QPen, QColor
 from PyQt6.QtWidgets import QGraphicsPolygonItem, QGraphicsEllipseItem
-from shapely.geometry import Polygon
 
+from core.tools.base import MaskTool
 from services.logger import get_logger
 
 logger = get_logger(__name__)
 
 
-class IntelligentScissors(QObject):
-    """
-    Optimized Intelligent Scissors functionality.
-    """
-    mask_added = pyqtSignal(str, np.ndarray)
+class IntelligentScissors(MaskTool):
+    label = "scissors"
 
-    def __init__(self, parent, threshold=100):
-        super().__init__()
-        self.parent = parent
-        self.edge_weights = None  # Precomputed edge weights
+    def __init__(self, host, threshold=100):
+        super().__init__(host)
+        self.edge_weights = None  # of the image on screen; made on the first click
         self.seed_points = []
         self.polygon_points = []
         self.current_polygon_item = None
         self.dynamic_path_item = None
-        self.path_cache = {}  # Cache for computed paths with a size limit
-        self.anchor_point = None  # Save the last intermediate anchor point
-        self.scale_factor = 0.5  # Default scaling factor
+        self.path_cache = {}  # computed paths, size-limited
+        self.anchor_point = None  # the last seed point
+        self.scale_factor = 0.5  # the edge map is made at half resolution
         self.threshold = threshold
         self.restrictive_circle_item = None
 
-        # Timer for throttling scene updates
+        # Throttled drawing of the path under the mouse
         self.update_timer = QTimer()
-        self.update_timer.setInterval(5)  # Update every 50ms
+        self.update_timer.setInterval(5)
         self.update_timer.timeout.connect(self.render_updates)
-        self.pending_updates = []  # Store pending updates
+        self.pending_updates = []
+
+    # -------------------------------------------------------------- input
+    def left_click(self, point, ctrl=False):
+        self.add_seed_point(point)
+
+    def mouse_move(self, point):
+        if self.seed_points:
+            self.update_dynamic_path(point)
+
+    def image_changed(self, image):
+        """A new image: its edges are worked out on the first click."""
+        super().image_changed(image)
+        self.edge_weights = None
+        self.path_cache.clear()
 
     def update_dynamic_path(self, cursor_position):
         """
@@ -54,7 +68,7 @@ class IntelligentScissors(QObject):
             # Full path computation for closer points
             dynamic_path = self.compute_path(last_point, cursor_position)
 
-        self.pending_updates.append(dynamic_path)
+        self.pending_updates = [dynamic_path]   # only the newest path matters
         if not self.update_timer.isActive():
             self.update_timer.start()
 
@@ -74,7 +88,7 @@ class IntelligentScissors(QObject):
             pen.setWidth(2)
             self.dynamic_path_item = QGraphicsPolygonItem()
             self.dynamic_path_item.setPen(pen)
-            self.parent.scene.addItem(self.dynamic_path_item)
+            self.scene.addItem(self.dynamic_path_item)
 
         self.dynamic_path_item.setPolygon(path_polygon)
 
@@ -82,10 +96,8 @@ class IntelligentScissors(QObject):
         """
         Set the current image and compute the edge map and weights.
         """
+        self.path_cache.clear()
         if image is not None:
-            
-            #raise ValueError("No image provided.")
-
             resized_image = cv2.resize(image, (0, 0), fx=self.scale_factor, fy=self.scale_factor)
             gray_image = cv2.cvtColor(resized_image, cv2.COLOR_RGB2GRAY)
             edge_map = cv2.Canny(gray_image, 50, 150)
@@ -99,8 +111,9 @@ class IntelligentScissors(QObject):
         Add a seed point and update the polygon.
         """
         if self.edge_weights is None:
-            return
-            #raise ValueError("Edge weights not set. Please set the image first.")
+            self.set_image(self.host.image())
+            if self.edge_weights is None:
+                return
 
         if self.seed_points:
             last_point = self.seed_points[-1]
@@ -128,14 +141,14 @@ class IntelligentScissors(QObject):
         Draw a visual representation of the restrictive threshold around the last seed point.
         """
         if self.restrictive_circle_item:
-            self.parent.scene.removeItem(self.restrictive_circle_item)
+            self.scene.removeItem(self.restrictive_circle_item)
 
         rect = QRectF(center[0] - self.threshold, center[1] - self.threshold, self.threshold * 2, self.threshold * 2)
         pen = QPen(QColor(255, 0, 0))  # Red color
         pen.setWidth(1)
         self.restrictive_circle_item = QGraphicsEllipseItem(rect)
         self.restrictive_circle_item.setPen(pen)
-        self.parent.scene.addItem(self.restrictive_circle_item)
+        self.scene.addItem(self.restrictive_circle_item)
 
     def compute_path(self, start, end):
         """
@@ -213,33 +226,25 @@ class IntelligentScissors(QObject):
         Update the polygon display in the parent scene.
         """
         if self.current_polygon_item:
-            self.parent.scene.removeItem(self.current_polygon_item)
+            self.scene.removeItem(self.current_polygon_item)
             self.current_polygon_item = None
 
         if not self.polygon_points:
             return
 
-        #simplified_points = self.simplify_polygon(self.polygon_points)
         polygon = QPolygonF([QPointF(x, y) for x, y in self.polygon_points])
 
         pen = QPen(QColor(0, 255, 255))  # Cyan color
         pen.setWidth(2)
         polygon_item = QGraphicsPolygonItem(polygon)
         polygon_item.setPen(pen)
-        self.parent.scene.addItem(polygon_item)
+        self.scene.addItem(polygon_item)
         self.current_polygon_item = polygon_item
 
-    def simplify_polygon(self, points, tolerance=2.0):
-        """
-        Simplify a polygon for rendering.
-        """
-        polygon = Polygon(points)
-        simplified = polygon.simplify(tolerance, preserve_topology=True)
-        return list(simplified.exterior.coords)
-
     def clear_dynamic_path(self):
+        self.pending_updates = []
         if self.dynamic_path_item:
-            self.parent.scene.removeItem(self.dynamic_path_item)
+            self.scene.removeItem(self.dynamic_path_item)
             self.dynamic_path_item = None
 
     def clear_polygon(self):
@@ -248,47 +253,25 @@ class IntelligentScissors(QObject):
         self.anchor_point = None  # Reset the anchor point
 
         if self.current_polygon_item:
-            self.parent.scene.removeItem(self.current_polygon_item)
+            self.scene.removeItem(self.current_polygon_item)
             self.current_polygon_item = None
 
         self.clear_dynamic_path()
         logger.debug("Cleared scissors polygon")
+
     def remove_restrictive_threshold(self):
         """
         Remove the restrictive threshold visual indicator.
         """
         if self.restrictive_circle_item:
-            self.parent.scene.removeItem(self.restrictive_circle_item)
+            self.scene.removeItem(self.restrictive_circle_item)
             self.restrictive_circle_item = None
-    def complete_mask(self):
-        """
-        Complete the current mask and add it to the list of masks.
-        """
-        if not self.parent.parent.sidebar.has_valid_class_selection():
-            self.clear_temp_items()
-            return  # ❌ Cancel saving if no valid class is selected
-
-        # Create the mask polygon from the polygon points
-        mask_polygon = np.array(self.polygon_points, dtype=np.float32)
-        image_name = self.parent.parent.state_manager.current_image_name
-        class_name, selected_color = self.parent.parent.sidebar.get_selected_class_color()
-        self.parent.parent.state_manager.mask_manager.save_mask(mask_polygon, image_name, class_name)
-        logger.info("Saved scissors mask (%d points) for image %s as class %r",
-                    mask_polygon.shape[0], image_name, class_name)
-        # Emit the signal
-        self.mask_added.emit(image_name, mask_polygon)
-        
-        # Clear temporary items
-        self.clear_temp_items()
-
+    # ------------------------------------------------------------- saving
+    def current_polygon(self):
+        if not self.polygon_points:
+            return None
+        return np.array(self.polygon_points, dtype=np.float32)
 
     def clear_temp_items(self):
         self.clear_polygon()
         self.remove_restrictive_threshold()
-
- 
-
-
-        # Clear temporary items
-        return 
-

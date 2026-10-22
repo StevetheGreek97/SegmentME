@@ -76,12 +76,14 @@ def test_new_project_failure_leaves_no_half_project(qapp, tmp_path, originals, n
         d.img_list.add_file(f)
     calls = []
 
-    def fail_second(src, dest, mode):
+    real = image_files.place_image
+
+    def fail_second(src, dest, mode, *args):
         calls.append(src)
         if len(calls) == 2:
             raise OSError(28, "No space left on device")
-        return image_files.place_image(src, dest, mode)
-    monkeypatch.setattr(project_dialog.image_files, "place_image", fail_second)
+        return real(src, dest, mode, *args)
+    monkeypatch.setattr(image_files, "place_image", fail_second)
     d._finalize()
     assert not (tmp_path / "proj").exists()
     assert all(f.exists() for f in originals)
@@ -98,3 +100,23 @@ def test_new_project_can_ask_to_import_annotations(qapp, tmp_path, originals, no
         d.annotations_check.setChecked(checked)
         d._finalize()
         assert d.selected_project_db and d.import_annotations is checked
+
+
+def test_new_project_refuses_when_copies_do_not_fit(qapp, tmp_path, originals, no_popups, monkeypatch):
+    from collections import namedtuple
+    from ui.dialogs import project_dialog, place_progress
+    Usage = namedtuple("Usage", "total used free")
+    monkeypatch.setattr(place_progress.shutil, "disk_usage", lambda p: Usage(10, 10, 1000))
+    d = project_dialog.CreateProjectDialog()
+    d.path_input.setText(str(tmp_path))
+    d.name_input.setText("proj")
+    for f in originals:
+        d.img_list.add_file(f)
+    d.image_mode.set_mode(image_files.COPY)
+    d._finalize()
+    assert not (tmp_path / "proj").exists() and d.selected_project_db is None
+    assert no_popups and "only" in no_popups[0][2] and "Link to the original files" in no_popups[0][2]
+    # Linking needs no space, so it goes ahead
+    d.image_mode.set_mode(image_files.LINK)
+    d._finalize()
+    assert (tmp_path / "proj" / "images" / "one.png").exists()

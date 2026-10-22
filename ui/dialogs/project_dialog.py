@@ -8,6 +8,10 @@ from PyQt6.QtGui import QColor, QPalette
 from services.recent_projects import load_recent_projects, remove_recent_project, delete_project_and_remove_recent
 from ui.recent_item import RecentItemWidget
 from ui.dialogs.image_mode import ImageModeChoice
+from ui.dialogs.place_progress import enough_space, run_placement
+from services.logger import get_logger
+
+logger = get_logger(__name__)
 from services import image_files
 import shutil, os, re, pathlib, platform, json
 from datetime import datetime
@@ -250,15 +254,25 @@ class CreateProjectDialog(QDialog):
             return
 
         mode = self.image_mode.mode()
-        placements = []
+        if not enough_space(self, self.img_list.file_list, project_path, mode, "Create Project"):
+            return
         try:
             (project_path / "images").mkdir(parents=True)
             (project_path / ".segmentme").mkdir(parents=True)
 
-            for i, f in enumerate(self.img_list.file_list):
-                dest = project_path / "images" / pathlib.Path(f).name
-                placements.append(image_files.place_image(f, dest, mode))
-                self.progress.setValue(int((i + 1) / max(1, len(self.img_list.file_list)) * 100))
+            # Copying runs on a worker thread with a progress window and Cancel.
+            jobs = [(f, str(project_path / "images" / pathlib.Path(f).name))
+                    for f in self.img_list.file_list]
+            logger.info("Creating project %s with %d image(s), %s", project_path, len(jobs), mode)
+            run = run_placement(self, jobs, mode, title="Create Project", stop_on_error=True)
+            if run.cancelled:
+                logger.info("Creating project %s cancelled; folder removed", project_path)
+                shutil.rmtree(project_path, ignore_errors=True)
+                return  # back to the dialog, nothing created
+            if run.error is not None:
+                raise run.error
+            placements = run.result.placements
+            self.progress.setValue(100)
 
             seproj_data = {
                 "name": name,
@@ -271,6 +285,9 @@ class CreateProjectDialog(QDialog):
 
             self.selected_project_db = str(project_path / ".segmentme" / "masks.db")
             self.import_annotations = self.annotations_check.isChecked()
+            logger.info("Created project %s (%s)%s", project_path,
+                        image_files.summarize(placements) or "no images",
+                        "; annotations to import next" if self.import_annotations else "")
             fallback = [how for how, reason in placements if how == image_files.COPIED and reason]
             if mode == image_files.LINK and fallback:
                 QMessageBox.information(self, "Some images were copied",
@@ -280,6 +297,7 @@ class CreateProjectDialog(QDialog):
         except Exception as e:
             # Don't leave a half-made project behind (it would block the name).
             # Removing it deletes links only, never the original images.
+            logger.exception("Creating project %s failed; folder removed", project_path)
             shutil.rmtree(project_path, ignore_errors=True)
             QMessageBox.critical(self, "Error", str(e))
 

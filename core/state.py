@@ -4,7 +4,6 @@ from core.database.connection import DatabaseConnection
 from core.database.mask_manager import MaskDatabaseManager
 from services.logger import get_logger
 
-from PyQt6.QtGui import QColor
 from PyQt6.QtCore import QObject, pyqtSignal
 from pathlib import Path
 
@@ -12,7 +11,8 @@ logger = get_logger(__name__)
 
 class StateManager(QObject):
     image_changed = pyqtSignal(str)
-    masks_updated = pyqtSignal()
+    masks_updated = pyqtSignal()     # masks were added, removed or changed
+    classes_changed = pyqtSignal()   # classes were added, removed, renumbered or recoloured
     """
     Manages the application state including the current image index, path, and associated masks and colors.
     """

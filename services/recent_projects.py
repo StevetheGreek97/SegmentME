@@ -163,17 +163,9 @@ def _sync_seproj_images(main_window, project_root, image_paths) -> bool:
     # stores filenames WITH extension (e.g. "fish1.jpg") — strip before deleting.
     missing_db = [os.path.splitext(n)[0] for n in missing]
 
-    db = main_window.state_manager.db
     try:
-        db.begin()
-        for i in range(0, len(missing_db), _CHUNK):
-            chunk = missing_db[i : i + _CHUNK]
-            ph = ",".join("?" * len(chunk))
-            db.execute_query(f"DELETE FROM masks WHERE image_name IN ({ph})", chunk)
-        db.commit()
-        main_window.state_manager.masks_updated.emit()
+        main_window.state_manager.mask_manager.delete_for_images(missing_db, chunk=_CHUNK)
     except Exception as exc:
-        db.rollback()
         logger.exception("Failed to remove orphaned masks for %d missing image(s)", len(missing))
         QMessageBox.warning(
             main_window, "DB Cleanup Warning",
@@ -218,7 +210,8 @@ def initialize_project(main_window, db_path):
         main_window.config = config
         main_window.state_manager.set_image_paths(image_paths)
         main_window.slider.set_image_count(len(image_paths))
-        main_window.image_display.display_image(main_window.state_manager.current_image_path)
+        # read on a worker thread: a scan on a cloud drive can take seconds
+        main_window.image_display.show_image(main_window.state_manager.current_image_path)
         QTimer.singleShot(0, main_window.image_display.fit_to_view)
 
         # Sync classes from DB into .SEproj on every open

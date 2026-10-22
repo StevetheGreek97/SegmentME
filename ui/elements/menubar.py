@@ -1,6 +1,5 @@
-from PyQt6.QtWidgets import QMenuBar, QDialog, QVBoxLayout, QTextEdit, QPushButton, QTextBrowser
+from PyQt6.QtWidgets import QMenuBar, QDialog, QVBoxLayout, QPushButton, QTextBrowser
 from PyQt6.QtGui import QAction, QFont
-from ui.dialogs.export_dialog import ExportDialog
 from ui.dialogs.model_manager_dialog import ModelManagerDialog
 
 from core.tools import sam_registry
@@ -43,7 +42,7 @@ class MenuBar(QMenuBar):
             ("Import Images", self.parent.import_images),
             ("Import Annotations…", self.parent.import_annotations),
             ("Annotations", self.parent.show_results ), #self.parent.toggle_results_dock
-            ("Save Results", self.parent.save_results_csv),
+            ("Save Results…", self.parent.save_results_csv),
             ("Export annotations", self.parent._export_results), 
             ("Exit", self.parent.close),
         ]
@@ -56,7 +55,8 @@ class MenuBar(QMenuBar):
 
         actions = [
             ("Run Inference", lambda: self.parent.popup_inference_dialog('Running inference...')),
-             ("Train Custom Model", self.parent.popup_training_dialog)
+             ("Train Custom Model", self.parent.popup_training_dialog),
+            ("Set Scale…", self.parent.set_scale),
         ]
 
         self._add_actions_to_menu(actions_menu, actions)
@@ -83,6 +83,14 @@ class MenuBar(QMenuBar):
             lambda checked: self.parent.image_display.set_masks_visible(checked)
         )
         view_menu.addAction(self.toggle_masks_action)
+
+        self.scale_bar_action = QAction("Show Scale Bar", self.parent)
+        self.scale_bar_action.setCheckable(True)
+        self.scale_bar_action.setChecked(True)
+        self.scale_bar_action.setToolTip("Scale bar in the corner of the image "
+                                         "(needs a scale: Actions > Set Scale…)")
+        self.scale_bar_action.toggled.connect(self.parent.set_scale_bar_visible)
+        view_menu.addAction(self.scale_bar_action)
 
     def _init_settings_menu(self):
         """
@@ -179,21 +187,3 @@ class MenuBar(QMenuBar):
 
         doc_dialog.setLayout(layout)
         doc_dialog.exec()
-
-    def show_export_dialog(self):
-        dialog = ExportDialog(self.parent)
-        if dialog.exec():
-            settings = dialog.get_settings()
-
-            if not settings["output_dir"]:
-                logger.warning("Export aborted: no output folder selected")
-                return
-
-            #  Call your export logic
-            self.parent.export_annotations(
-                format=settings["format"],
-                output_dir=settings["output_dir"],
-                train_pct=settings["train"],
-                val_pct=settings["val"],
-                test_pct=settings["test"]
-            )

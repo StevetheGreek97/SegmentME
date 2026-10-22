@@ -25,7 +25,7 @@ fractions (0-1) of the image size. The rules:
 Nothing here touches the GUI; ui/dialogs/import_dialog.py drives it.
 """
 import re
-import warnings
+import time
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -38,6 +38,7 @@ import yaml
 from PIL import Image
 
 from services.logger import get_logger
+from services.pil_limits import large_images_allowed
 
 logger = get_logger(__name__)
 
@@ -271,23 +272,9 @@ def parse_label_file(path, class_names: Dict[int, str]) -> LabelResult:
 # --------------------------------------------------------------------------
 # Images
 # --------------------------------------------------------------------------
-class _LargeImagesAllowed:
-    """Lifts PIL's "decompression bomb" size check (large scans are expected)
-    and its warnings while active. Both are process-wide settings, so set
-    them once around a batch rather than per image in each thread."""
-
-    def __enter__(self):
-        self._limit = Image.MAX_IMAGE_PIXELS
-        Image.MAX_IMAGE_PIXELS = None
-        self._warnings = warnings.catch_warnings()
-        self._warnings.__enter__()
-        warnings.simplefilter("ignore", Image.DecompressionBombWarning)
-        return self
-
-    def __exit__(self, *exc):
-        self._warnings.__exit__(*exc)
-        Image.MAX_IMAGE_PIXELS = self._limit
-        return False
+def _LargeImagesAllowed():
+    """Lift PIL's size check for large scans (thread-safe; see services/pil_limits.py)."""
+    return large_images_allowed()
 
 
 def image_size(path) -> Tuple[int, int]:
@@ -386,7 +373,19 @@ def scan_annotations(folder, class_names: Dict[int, str], project_images: Iterab
         entries.append(LabelEntry(path, stem, IMPORT, image_path=images[0],
                                   existing_masks=int(existing_masks.get(stem, 0))))
 
+    started = time.perf_counter()
     _read_matched(entries, class_names, progress)
+    statuses = Counter(e.status for e in entries)
+    logger.info("Scanned %d .txt file(s) in %s in %.1f s: %d matched (%d broken), "
+                "%d without project image, %d same-name, %d ambiguous, %d image unreadable",
+                len(entries), folder, time.perf_counter() - started, statuses[IMPORT],
+                sum(1 for e in entries if e.status == IMPORT and e.label and e.label.error),
+                statuses[NO_IMAGE], statuses[DUPLICATE], statuses[AMBIGUOUS], statuses[UNREADABLE])
+    for e in entries:
+        if e.status == IMPORT and e.label is not None and e.label.error:
+            logger.debug("Broken %s: %s", e.label_path, e.label.error)
+        elif e.status == UNREADABLE:
+            logger.warning("Image for %s can't be read: %s", e.label_path.name, e.note)
 
     matched = {e.stem for e in entries if e.status in (IMPORT, UNREADABLE, DUPLICATE, AMBIGUOUS)}
     without = sum(len(v) for k, v in by_stem.items() if k not in matched)

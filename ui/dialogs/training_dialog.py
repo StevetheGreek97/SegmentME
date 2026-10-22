@@ -4,7 +4,6 @@ from PyQt6.QtWidgets import (
     QMessageBox, QScrollArea, QWidget, QFormLayout, QGroupBox
 )
 from core.trainer.trainer_settings import TrainingSettings
-import os
 from services.hardware import auto_detect_device 
 from pathlib import Path
 

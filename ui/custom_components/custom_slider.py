@@ -1,6 +1,6 @@
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QLabel, QApplication
+from PyQt6.QtWidgets import QWidget
 from PyQt6.QtCore import Qt, QRectF, QPointF
-from PyQt6.QtGui import QPainter, QColor, QPen, QBrush, QMouseEvent, QPainterPath
+from PyQt6.QtGui import QPainter, QColor, QPen, QBrush, QMouseEvent
 from PyQt6.QtCore import pyqtSignal
 class ColorRangeSlider(QWidget):
     splitChanged = pyqtSignal(int, int)

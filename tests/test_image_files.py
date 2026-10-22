@@ -168,3 +168,88 @@ def test_loader_sees_upper_case_extensions(tmp_path):
     for name in ("a.PNG", "b.jpg", "c.TIF", "d.txt"):
         (tmp_path / name).write_bytes(b"x")
     assert sorted(os.path.basename(p) for p in loader(str(tmp_path))) == ["a.PNG", "b.jpg", "c.TIF"]
+
+
+# --------------------------------------------------------------------------
+# Copying in pieces, batches, cancel
+# --------------------------------------------------------------------------
+@pytest.fixture
+def big(tmp_path, monkeypatch):
+    monkeypatch.setattr(image_files, "_COPY_CHUNK", 1000)   # many pieces for a small file
+    p = tmp_path / "originals" / "big.tif"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_bytes(os.urandom(10_500))
+    return p
+
+
+def test_copy_reports_bytes_and_is_identical(big, images_dir):
+    seen = []
+    image_files.place_image(big, images_dir / big.name, image_files.COPY, on_bytes=seen.append)
+    assert sum(seen) == 10_500 and len(seen) == 11
+    assert (images_dir / big.name).read_bytes() == big.read_bytes()
+
+
+def test_cancel_during_a_copy_leaves_no_partial_file(big, images_dir):
+    seen = []
+    with pytest.raises(image_files.PlacementCancelled):
+        image_files.place_image(big, images_dir / big.name, image_files.COPY,
+                                cancelled=lambda: len(seen) >= 3, on_bytes=seen.append)
+    assert not os.path.lexists(images_dir / big.name)
+    assert big.stat().st_size == 10_500
+
+
+def _jobs(tmp_path, images_dir, n=4):
+    srcs = [make_image(tmp_path / "originals" / f"img{i}.png") for i in range(n)]
+    return [(str(s), str(images_dir / s.name)) for s in srcs]
+
+
+def test_batch_skips_taken_names_and_reports_failures(tmp_path, images_dir, monkeypatch):
+    jobs = _jobs(tmp_path, images_dir)
+    (images_dir / "img1.png").write_bytes(b"already here")
+    real = image_files.place_image
+
+    def flaky(src, dest, *a):
+        if dest.endswith("img2.png"):
+            raise OSError(errno.EACCES, "Permission denied")
+        return real(src, dest, *a)
+    monkeypatch.setattr(image_files, "place_image", flaky)
+    progress = []
+    r = image_files.place_images(jobs, image_files.COPY, progress=lambda i, n, name: progress.append(i))
+    assert sorted(os.listdir(images_dir)) == ["img0.png", "img1.png", "img3.png"]
+    assert r.skipped == ["img1.png"] and r.failed == [("img2.png", "Permission denied")]
+    assert (images_dir / "img1.png").read_bytes() == b"already here"
+    assert progress == [0, 1, 2, 3, 4]
+
+
+@pytest.mark.parametrize("err, stop", [(errno.EACCES, True), (errno.ENOSPC, False)])
+def test_batch_errors_that_stop_undo_everything(tmp_path, images_dir, monkeypatch, err, stop):
+    jobs = _jobs(tmp_path, images_dir)
+    real = image_files.place_image
+
+    def fail_third(src, dest, *a):
+        if dest.endswith("img2.png"):
+            raise OSError(err, os.strerror(err))
+        return real(src, dest, *a)
+    monkeypatch.setattr(image_files, "place_image", fail_third)
+    with pytest.raises(OSError):
+        image_files.place_images(jobs, image_files.COPY, stop_on_error=stop)
+    assert os.listdir(images_dir) == []
+    assert all(os.path.exists(src) for src, _ in jobs)
+
+
+@pytest.mark.parametrize("mode", [image_files.COPY, image_files.LINK])
+def test_batch_cancel_undoes_everything_and_keeps_originals(tmp_path, images_dir, mode):
+    jobs = _jobs(tmp_path, images_dir)
+    seen = []
+    with pytest.raises(image_files.PlacementCancelled):
+        image_files.place_images(jobs, mode, cancelled=lambda: len(seen) >= 2,
+                                 progress=lambda i, n, name: seen.append(i))
+    assert os.listdir(images_dir) == []
+    assert all(os.path.getsize(src) > 0 for src, _ in jobs)
+
+
+def test_bytes_to_copy(tmp_path, images_dir):
+    jobs = _jobs(tmp_path, images_dir, 2)
+    srcs = [s for s, _ in jobs]
+    assert image_files.bytes_to_copy(srcs, image_files.COPY) == sum(os.path.getsize(s) for s in srcs)
+    assert image_files.bytes_to_copy(srcs, image_files.LINK) == 0

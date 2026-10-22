@@ -16,6 +16,9 @@ import numpy as np
 import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+# Keep the app's log of test runs out of the user's real log folder.
+import tempfile  # noqa: E402
+os.environ.setdefault("SEGMENTME_LOG_DIR", os.path.join(tempfile.gettempdir(), "segmentme-test-logs"))
 
 REPO = Path(__file__).resolve().parent.parent
 if str(REPO) not in sys.path:
@@ -74,3 +77,15 @@ def can_symlink(tmp_path) -> bool:
 @pytest.fixture
 def rng():
     return np.random.default_rng(0)
+
+
+def wait_for_image(window, timeout=10):
+    """Opening a project / Next read the image on a worker thread: wait
+    until it is on screen."""
+    import time
+    from PyQt6.QtWidgets import QApplication
+    end = time.time() + timeout
+    while time.time() < end and (window.image_display.loading() or window.image_display.busy()):
+        QApplication.processEvents()
+        time.sleep(0.005)
+    QApplication.processEvents()

@@ -1,23 +1,27 @@
 from PyQt6.QtWidgets import (
-    QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QGraphicsPathItem, QTableWidget,
+    QGraphicsView, QGraphicsScene, QGraphicsPixmapItem,
 )
-from PyQt6.QtCore import Qt, QPointF, QItemSelection, QItemSelectionModel
-from PyQt6.QtGui import QImage, QPixmap, QPainter, QPainterPath, QPen, QColor, QPolygonF
-from core.tools.manual_mask import ManualMask
-from core.tools.sam2_masker import SamMasker2
-from core.tools.dextr_mask import DEXTRMasker
-from core.tools.intellignent_scissors import IntelligentScissors
+from PyQt6.QtCore import Qt, QPointF, QTimer, pyqtSignal
+from PyQt6.QtGui import QPixmap, QPainter, QPolygonF
 from ui.custom_components.mask_context_menu import MaskContextMenu
 from ui.elements.image_display.edit_modes import SplitStrokeMode, BrushEditMode
 from services.logger import get_logger
 from services.image_files import missing_image_message
+from ui.elements.image_display.scale_bar import ScaleBar
+from ui.elements.image_display.selection_outlines import SelectionOutlines
+from ui.elements.image_display.image_loader import (BackgroundImageReader, LoadingLabel, Prefetcher,
+                                                    prepare_image, read_rgb)
+from ui.elements.image_display.array_image_item import ArrayImageItem
+from ui.elements.image_display.tool_host import ViewToolHost
+from ui.elements.image_display.mask_renderer import MaskRenderer
+from ui.elements.image_display.segment_runner import SegmentRunner
+import os
 import cv2
 import numpy as np
 import time
 
 logger = get_logger(__name__)
 
-from PyQt6.QtWidgets import QApplication
 
 
 class ImageDisplay(QGraphicsView):
@@ -27,6 +31,11 @@ class ImageDisplay(QGraphicsView):
     touches image-sized buffers; edit modes draw their previews into
     `highlight_item` (see edit_modes.py).
     """
+
+    # Requests to the rest of the window (connected in MainApp)
+    select_in_table = pyqtSignal(list, bool)    # mask ids, skip rows already selected
+    table_selection_cleared = pyqtSignal()
+    status_message = pyqtSignal(str, int)       # text ("" clears), ms to show (0 = until replaced)
 
     def __init__(self, parent):
         super().__init__(parent)
@@ -46,7 +55,7 @@ class ImageDisplay(QGraphicsView):
         self.setScene(self.scene)
 
         # Base image item
-        self.pixmap_item = QGraphicsPixmapItem()
+        self.pixmap_item = ArrayImageItem()   # draws the numpy array itself: no QPixmap copy
         self.pixmap_item.setZValue(0)
         self.scene.addItem(self.pixmap_item)
 
@@ -55,13 +64,9 @@ class ImageDisplay(QGraphicsView):
         self.highlight_item.setZValue(10)
         self.scene.addItem(self.highlight_item)
 
-        # Selection outlines: one vector path for all selected masks, so its
-        # cost follows the selected outlines, not the image size.
-        self.selection_item = QGraphicsPathItem()
-        outline_pen = QPen(QColor(255, 255, 255))
-        outline_pen.setWidthF(2)
-        outline_pen.setCosmetic(True)  # 2 screen pixels at every zoom level
-        self.selection_item.setPen(outline_pen)
+        # Selection outlines: a vector item drawing only the outlines in view,
+        # so its cost follows the visible selected masks, not the image size.
+        self.selection_item = SelectionOutlines()   # see selection_outlines.py
         self.selection_item.setZValue(11)
         self.scene.addItem(self.selection_item)
 
@@ -72,7 +77,6 @@ class ImageDisplay(QGraphicsView):
         self.setMouseTracking(True)
 
         # Cached data
-        self.cached_image_with_masks = None
         self._mask_index = {}               # str(mask_id) -> np.ndarray(int32) polygon
         self._mask_outlines = {}            # str(mask_id) -> QPolygonF, built on first highlight
 
@@ -86,40 +90,151 @@ class ImageDisplay(QGraphicsView):
         # Shown instead of the image when its file can't be opened (e.g. the
         # original of a linked image was moved); drawing is off meanwhile.
         self._missing_item = None
+        self.shown_path = None              # path of the image on screen (None: none / missing)
+
+        # Scale bar (bottom-left), shown when the image has a scale
+        self.scale_bar = ScaleBar(self)
+        self._bar_um_per_px = None
+
+        # Next / Previous / slider read the file on a worker thread, then the
+        # neighbours are read ahead (see image_loader.py)
+        self._image_loader = BackgroundImageReader(self, self._prepare_image, self._image_loaded)
+        self._pending_render = None          # (db path, class colours, masks shown) for the worker
+        self._prefetch = Prefetcher()
+        self.renderer = MaskRenderer(self)   # draws the masks into the picture shown
+        self._segmenter = SegmentRunner(self)  # E with SAM / DEXTR, on a worker thread
+        self._loading_label = LoadingLabel(self)
+
+        # What the drawing tools may use of the app (core/tools/base.py)
+        self.tool_host = ViewToolHost(self)
+
+        # Masks or classes changed anywhere (tools, table, inference, import):
+        # redraw once per burst of changes, unless already redrawn since
+        self._masks_version = 0         # bumped by every change
+        self._drawn_version = 0         # the version the picture shows
+        self._redraw_timer = QTimer(self)
+        self._redraw_timer.setSingleShot(True)
+        self._redraw_timer.timeout.connect(self._redraw_if_changed)
+        state = parent.state_manager
+        state.masks_updated.connect(self._masks_changed)
+        state.classes_changed.connect(self._masks_changed)
 
     # ---------- Public API ----------
 
-    def display_image(self, image_path, preserve_zoom=False):
+    # ---------- Loading on a worker thread (Next / Previous / slider / search) ----------
+    def show_image(self, image_path):
+        """Show `image_path` without freezing the window: the file is read on
+        a worker thread (a scan on a cloud drive can take seconds to arrive)
+        while the current image stays up with "Loading…" on it. Drawing is
+        off meanwhile. Moving on again before it arrives: only the image the
+        user ends on is shown. Afterwards the neighbours are read ahead."""
+        if not image_path:
+            return
+        loader = self._image_loader
+        loader.want = image_path
+        # what belongs to the image being left
+        self._tell_tool_image_changed(None)
+        self.cancel_edit_mode()
+        self.highlighted_mask_ids = []
+        self.selection_item.set_polygons([])
+        self._prefetch.cancel()
+        self._loading_label.show_for(os.path.basename(image_path))
+        if loader.future is None:
+            self._start_load(image_path)
+
+    def _start_load(self, image_path):
+        # What the worker needs to draw the masks, taken here on the GUI thread
+        self._pending_render = (self.parent.state_manager.db.db_path, self.renderer.class_colors(),
+                                self.renderer.masks_shown())
+        self._image_loader.start(image_path)
+
+    def _prepare_image(self, image_path):
+        """Worker thread: the file read and its masks drawn (image_loader.prepare)."""
+        return prepare_image(image_path, *self._pending_render)
+
+    def loading(self) -> bool:
+        """True while an image is being read for show_image()."""
+        return self._image_loader.want is not None
+
+    def busy(self) -> bool:
+        """True while anything runs in the background for the view."""
+        return self.loading() or self.segmenting()
+
+    def _image_loaded(self, path, image, seconds):
+        """Worker read finished (on the GUI thread). Show it, unless the user
+        moved on: then read the image they are on now."""
+        loader = self._image_loader
+        state = self.parent.state_manager
+        if loader.want is None:                      # shown another way meanwhile
+            return
+        if path != loader.want:
+            self._start_load(loader.want)
+            return
+        loader.want = None
+        self._loading_label.hide()
+        if path != state.current_image_path:         # e.g. the project changed
+            logger.debug("Dropped %s: no longer the current image", os.path.basename(path))
+            return
+        if image is None:
+            logger.error("Failed to load image %s (missing or unreadable)", path)
+            self._show_missing_image(path)
+            return
+        logger.debug("Background load of %s: read %.0f ms, masks drawn %.0f ms",
+                     os.path.basename(path), image["read_s"] * 1000, image["draw_s"] * 1000)
+        self.display_image(path, image=image["image"], read_seconds=seconds, prepared=image)
+        self._prefetch.around(state.image_paths, state.image_index)
+
+    @staticmethod
+    def _read_rgb(image_path):
+        return read_rgb(image_path)
+
+    def display_image(self, image_path, preserve_zoom=False, image=None, read_seconds=None,
+                      prepared=None):
         """
         Load and display the image; render filled masks once to base pixmap.
         Prepare a transparent overlay for fast highlights.
+        image: the file already read by show_image() (RGB), or None to read it here.
+        prepared: show_image()'s worker result (masks already drawn), if any.
         """
         if not image_path:
             logger.warning("display_image called without an image path")
             return
+        self._image_loader.want = None               # an older background load is dropped
+        self._loading_label.hide()
 
-        image = cv2.imread(image_path)
+        t_start = time.perf_counter()
+        if image is None:
+            image = self._read_rgb(image_path)
+            t_read = time.perf_counter()
+        else:
+            t_read = t_start
+            t_start -= read_seconds or 0.0           # count the background read in the log
         if image is None:
             logger.error("Failed to load image %s (missing or unreadable)", image_path)
             self._show_missing_image(image_path)
             return
         self._clear_missing_image()
 
-        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         self.parent.state_manager.current_image = image
+        self.shown_path = image_path
+        t_convert = time.perf_counter()
 
         if not preserve_zoom:
             # A selection belongs to the image it was made on (the table's
             # selection is reset for the new image too).
             self.highlighted_mask_ids = []
 
-        # Build polygon index for this image so highlights don't call load_masks every time
-        self._rebuild_mask_index()
+        self._drawn_version = self._masks_version      # drawn from the database now
+        masks, picture = None, None
+        if prepared is not None and self.renderer.prepared_still_valid(prepared):
+            masks, picture = prepared["masks"], prepared["picture"]
 
-        # Render base once
+        # Build polygon index for this image so highlights don't call load_masks every time
+        self._rebuild_mask_index(masks)
+
+        # Render base once (already done on the worker thread for show_image)
         t0 = time.perf_counter()
-        self.cached_image_with_masks = self.overlay_base_masks(image)
-        self._set_base_pixmap(self.cached_image_with_masks)
+        self.renderer.render_full(image, masks, picture=picture)
         t1 = time.perf_counter()
 
         # Clear any edit-mode preview; redraw the selection outlines
@@ -130,88 +245,60 @@ class ImageDisplay(QGraphicsView):
 
         # Fit view
         if not preserve_zoom:
+            self._tell_tool_image_changed(image)
             self.cancel_edit_mode()  # navigating away aborts a pending split/brush edit
             self.resetTransform()
             self._zoom_factor = 1.0
             self.scene.setSceneRect(self.pixmap_item.boundingRect())
             self.fitInView(self.pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
 
-        logger.debug("display_image: base_render=%.2f ms, outlines=%.2f ms",
-                     (t1 - t0) * 1000, (t2 - t1) * 1000)
+        self.update_scale()
 
-    def overlay_base_masks(self, image, alpha=0.4, outline_thickness=1, exclude_ids=None):
-        """
-        Copy of `image` with the masks blended in (one colour per class) and outlined.
-        exclude_ids: optional set of mask ids to leave unrendered (e.g. while brush-editing one).
+        total = time.perf_counter() - t_start
+        # INFO when slow, so the reason shows up in the log without debug detail
+        log = logger.info if total > 1.0 else logger.debug
+        log("display_image %s: %.0f ms total = read file %.0f%s + convert %.0f + masks %.0f "
+            "(%d) + selection %.0f + fit/scale %.0f ms; %dx%d px",
+            os.path.basename(image_path), total * 1000, (t_read - t_start) * 1000,
+            " (in the background)" if read_seconds is not None else "",
+            (t_convert - t_read) * 1000, (t1 - t0) * 1000, len(self._mask_index),
+            (t2 - t1) * 1000, (time.perf_counter() - t2) * 1000, image.shape[1], image.shape[0])
 
-        Blends inside each polygon's bounding box rather than over full-size
-        class masks, so the cost follows the masks' area instead of the image's
-        (it matters on large scans). The result is the same pixel for pixel.
-        """
-        output = image.copy()
-        if not self.masks_visible or self._peeking:
-            return output
-        masks = self.parent.state_manager.mask_manager.load_masks(
-            self.parent.state_manager.current_image_name
-        )
+    def _current_tool(self):
+        return self.parent.tool_manager.current_tool
 
-        # group by class for single blends
-        from collections import defaultdict
-        class_to_polys = defaultdict(list)
-        for mask_id, mask, class_name, _ in masks:
-            if exclude_ids and mask_id in exclude_ids:
-                continue
-            if mask.shape[0] >= 3:
-                class_to_polys[class_name].append(mask.astype(np.int32))
+    def _tell_tool_image_changed(self, image):
+        """Unfinished points etc. of the active tool belong to the image left."""
+        tool = self._current_tool()
+        if tool is not None:
+            tool.image_changed(image)
 
-        H, W = image.shape[:2]
-        class_mask = None  # one raster for all classes; all zero again after each class
-        for class_name, polys in class_to_polys.items():
-            if not polys:
-                continue
-            if class_mask is None:
-                class_mask = np.zeros((H, W), dtype=np.uint8)
-            # rasterize all polygons of the class
-            cv2.fillPoly(class_mask, polys, 255)
+    # The picture with masks and how it was last redrawn (kept on the
+    # renderer; these names are used by the edit modes and the tests)
+    @property
+    def cached_image_with_masks(self):
+        return self.renderer.picture
 
-            color = self.parent.state_manager.class_manager.get_class_color(class_name)
-            color_rgb = (int(color.red()), int(color.green()), int(color.blue()))
+    @cached_image_with_masks.setter
+    def cached_image_with_masks(self, picture):
+        self.renderer.picture = picture
 
-            for poly in polys:
-                x, y, w, h = cv2.boundingRect(poly)
-                x0, y0, x1, y1 = max(x, 0), max(y, 0), min(x + w, W), min(y + h, H)
-                if x1 <= x0 or y1 <= y0:
-                    continue  # polygon entirely outside the image
-                roi_mask = class_mask[y0:y1, x0:x1]
-                if not cv2.countNonZero(roi_mask):
-                    continue  # already blended through an overlapping box
-                roi_out = output[y0:y1, x0:x1]
-                roi_color = np.empty_like(roi_out); roi_color[:] = color_rgb
-                blended = cv2.addWeighted(roi_out, 1.0 - alpha, roi_color, alpha, 0.0)
-                cv2.copyTo(blended, roi_mask, roi_out)
-                # Clear the box: pixels shared with an overlapping polygon of
-                # this class must be blended once, as with one class-wide mask.
-                roi_mask[:] = 0
+    @property
+    def last_redraw(self):
+        return self.renderer.last_redraw
 
-            cv2.polylines(output, polys, isClosed=True, color=(0, 0, 0), thickness=outline_thickness)
-
-        return output
+    def overlay_base_masks(self, image, alpha=0.4, outline_thickness=1, exclude_ids=None, masks=None):
+        """Copy of `image` with the masks drawn in (see MaskRenderer.overlay)."""
+        return self.renderer.overlay(image, alpha, outline_thickness, exclude_ids, masks)
 
     def highlight_selected_masks(self, mask_ids):
         """
         Outline the given masks in white (vector item; no base redraw).
         """
         t0 = time.perf_counter()
-        path = QPainterPath()
-        drawn = 0
-        for mid in mask_ids:
-            outline = self._mask_outline(mid)
-            if outline is None:
-                continue
-            path.addPolygon(outline)
-            path.closeSubpath()
-            drawn += 1
-        self.selection_item.setPath(path)
+        outlines = [o for o in (self._mask_outline(mid) for mid in mask_ids) if o is not None]
+        self.selection_item.set_polygons(outlines)
+        drawn = len(outlines)
 
         logger.debug("highlight_overlay: %.2f ms total (%d polygons)",
                      (time.perf_counter() - t0) * 1000, drawn)
@@ -238,10 +325,13 @@ class ImageDisplay(QGraphicsView):
         if annotations is None or not hasattr(annotations, "table"):
             return
 
-        selected_ids = []
-        for item in annotations.table.selectedItems():
-            if item and item.column() == 1:
-                selected_ids.append(item.text())
+        # The table sends its selection along; asking it again cost as much
+        # once more (0.4 s for 5,000 selected rows).
+        if isinstance(selected_rows, list):
+            selected_ids = [str(row["mask_id"]) for row in selected_rows]
+        else:
+            selected_ids = [item.text() for item in annotations.table.selectedItems()
+                            if item and item.column() == 1]
 
         self.highlighted_mask_ids = selected_ids
         self.highlight_selected_masks(self.highlighted_mask_ids)
@@ -269,11 +359,61 @@ class ImageDisplay(QGraphicsView):
         self.resetTransform()
         self._zoom_factor = 1.0
         self.fitInView(self.pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
+        self._refresh_scale_bar()
 
-    def refresh_overlay(self, image_name, mask):
-        """A tool saved a mask: redraw the masks on the image already loaded
-        (re-reading a large scan from disk would only cost time)."""
+    # ---------- Scale bar ----------
+    def update_scale(self):
+        """Look up the current image's scale (Actions > Set Scale…) for the bar."""
+        um = None
+        main = self.parent
+        if (not self.image_missing and getattr(main, "project_scale", None) is not None
+                and main.project_scale.show_bar):
+            try:
+                um, _, _ = main.current_image_scale()
+            except Exception:
+                logger.exception("Could not read the image's scale")
+        self._bar_um_per_px = um
+        self._refresh_scale_bar()
+
+    def _refresh_scale_bar(self):
+        shown = self._bar_um_per_px if not self.pixmap_item.isNull() else None
+        self.scale_bar.set_state(shown, self.transform().m11())
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._refresh_scale_bar()
+        self._loading_label.place()
+
+    def scrollContentsBy(self, dx, dy):
+        # Qt scrolls the viewport's child widgets with the image: keep the
+        # scale bar in its corner (panning, scroll bars, zoom around the mouse).
+        super().scrollContentsBy(dx, dy)
+        if self.scale_bar.isVisibleTo(self):
+            self.scale_bar.place()
+        if self._loading_label.isVisibleTo(self):
+            self._loading_label.place()
+
+    def redraw_current(self):
+        """Classes or class colours changed: redraw the masks on the image
+        already in memory, keeping the zoom. (Reading the scan again cost
+        seconds on a cloud drive.) An image still loading gets drawn with the
+        new classes when it arrives."""
+        state = self.parent.state_manager
+        if self.loading():
+            return
+        if state.current_image is None:               # the file was missing: try again
+            if state.current_image_path:
+                self.display_image(state.current_image_path, preserve_zoom=True)
+            return
         self.refresh_masks()
+
+    def _masks_changed(self):
+        self._masks_version += 1
+        self._redraw_timer.start(0)
+
+    def _redraw_if_changed(self):
+        if self._drawn_version != self._masks_version:
+            self.redraw_current()
 
     def refresh_masks(self):
         """
@@ -281,10 +421,15 @@ class ImageDisplay(QGraphicsView):
         """
         if self.parent.state_manager.current_image is None:
             return
+        self._drawn_version = self._masks_version
 
         self._rebuild_mask_index()
-        self.cached_image_with_masks = self.overlay_base_masks(self.parent.state_manager.current_image)
-        self._set_base_pixmap(self.cached_image_with_masks)
+        image = self.parent.state_manager.current_image
+        masks = self.parent.state_manager.mask_manager.load_masks(
+            self.parent.state_manager.current_image_name)
+        t0 = time.perf_counter()
+        how = self.renderer.redraw(image, masks)
+        logger.debug("refresh_masks: %s redraw in %.1f ms", how, (time.perf_counter() - t0) * 1000)
 
         self.highlight_selected_masks(self.highlighted_mask_ids)
 
@@ -300,9 +445,9 @@ class ImageDisplay(QGraphicsView):
             profile=True
         )
 
-        # Clear selection locally; let the coalesced UI update handle repaint/table/plot
-        if hasattr(self.parent, 'annotations'):
-            self.parent.annotations.table.clearSelection()
+        # Clear the selection here and in the table; the table and statistics
+        # refresh themselves (masks_updated)
+        self.table_selection_cleared.emit()
         self.highlighted_mask_ids = []
         self.refresh_masks()
 
@@ -346,6 +491,7 @@ class ImageDisplay(QGraphicsView):
                 inv = 1 / zoom_step
                 self.scale(inv, inv)
                 self._zoom_factor *= inv
+        self._refresh_scale_bar()
 
     def _can_zoom_in(self):
         """Within _zoom_max of the fitted view, or while one image pixel is
@@ -369,12 +515,13 @@ class ImageDisplay(QGraphicsView):
         self.cancel_edit_mode()
         self._clear_missing_image()
         self.parent.state_manager.current_image = None
+        self.shown_path = None
         self.cached_image_with_masks = None
         self.highlighted_mask_ids = []
-        self.pixmap_item.setPixmap(QPixmap())
+        self.pixmap_item.set_array(None)
         self.highlight_item.setPixmap(QPixmap())
         self.highlight_item.setOffset(0, 0)
-        self.selection_item.setPath(QPainterPath())
+        self.selection_item.set_polygons([])
         self._mask_index, self._mask_outlines = {}, {}
 
         self._missing_item = self.scene.addText(missing_image_message(image_path))
@@ -385,6 +532,8 @@ class ImageDisplay(QGraphicsView):
         self._zoom_factor = 1.0
         self.scene.setSceneRect(self._missing_item.boundingRect())
         self.centerOn(self._missing_item)
+        self._bar_um_per_px = None
+        self._refresh_scale_bar()
 
     def _clear_missing_image(self):
         if self._missing_item is not None:
@@ -392,32 +541,32 @@ class ImageDisplay(QGraphicsView):
             self._missing_item = None
 
     def keyPressEvent(self, event):
-        if self.image_missing and event.key() in (Qt.Key.Key_S, Qt.Key.Key_E):
-            return  # no image to draw on
+        if (self.image_missing or self.loading()) and event.key() in (Qt.Key.Key_S, Qt.Key.Key_E):
+            return  # no image to draw on (yet)
         if self._edit_mode is not None and self._edit_mode.key_press(event):
             return
 
         if event.key() == Qt.Key.Key_S:
-            if self.parent.tool_manager.current_tool:
-                self.parent.tool_manager.current_tool.complete_mask()
-                if hasattr(self.parent, 'annotations') and self.parent.annotations is not None:
-                    self.parent.annotations.refresh_table(self.parent.state_manager.current_image_path)
-                if hasattr(self.parent, 'statistics') and self.parent.statistics is not None:
-                    self.parent.statistics.refresh_plot()
+            if self._current_tool() is not None:
+                self._current_tool().complete_mask()   # table + statistics follow masks_updated
 
         if event.key() == Qt.Key.Key_E:
-            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-            try:
-                tool = self.parent.tool_manager.current_tool
-                if isinstance(tool, (SamMasker2, DEXTRMasker)):
-                    tool.generate_mask(self.parent.state_manager.current_image)
-            finally:
-                QApplication.restoreOverrideCursor()
+            tool = self._current_tool()
+            if tool is not None and tool.segments_on_e:
+                self.segment_in_background(tool)   # seconds on a CPU: keep the window alive
+
+    # ---------- SAM / DEXTR on a worker thread (E): see segment_runner.py ----------
+    def segment_in_background(self, tool):
+        self._segmenter.run(tool)
+
+    def segmenting(self) -> bool:
+        """True while SAM or DEXTR runs in the background."""
+        return self._segmenter.busy()
 
     def mousePressEvent(self, event):
-        if self.image_missing and event.button() in (Qt.MouseButton.LeftButton,
-                                                     Qt.MouseButton.RightButton):
-            return  # no image to draw on or select masks in
+        if (self.image_missing or self.loading()) and event.button() in (Qt.MouseButton.LeftButton,
+                                                                         Qt.MouseButton.RightButton):
+            return  # no image to draw on or select masks in (yet)
         if event.button() == Qt.MouseButton.LeftButton:
             scene_pos = self.mapToScene(event.position().toPoint())
             point = (int(scene_pos.x()), int(scene_pos.y()))
@@ -430,24 +579,14 @@ class ImageDisplay(QGraphicsView):
 
             if selected_mask_ids:
                 self._select_masks(selected_mask_ids)
-            elif self.highlighted_mask_ids and self.parent.tool_manager.current_tool is None:
+            elif self.highlighted_mask_ids and self._current_tool() is None:
                 # Click on empty area with no tool active: deselect everything
                 self.clear_selection()
 
-            tool = self.parent.tool_manager.current_tool
-            if isinstance(tool, ManualMask):
-                tool.add_point(point)
-            elif isinstance(tool, DEXTRMasker):
-                tool.add_point(point)
-            elif isinstance(tool, SamMasker2):
-                if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
-                    # Ctrl + left drag draws the bounding-box prompt
-                    tool.box_start = point
-                    tool.is_drawing_box = True
-                else:
-                    tool.add_point(point, 1)
-            elif isinstance(tool, IntelligentScissors):
-                tool.add_seed_point(point)
+            tool = self._current_tool()
+            if tool is not None:
+                ctrl = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+                tool.left_click(point, ctrl)
 
         elif event.button() == Qt.MouseButton.RightButton:
             if self._edit_mode is not None:
@@ -456,14 +595,11 @@ class ImageDisplay(QGraphicsView):
                 if self._edit_mode.mouse_press(point, Qt.MouseButton.RightButton):
                     return
 
-            tool = self.parent.tool_manager.current_tool
-            if isinstance(tool, ManualMask):
-                tool.pop_last_point()
-            elif isinstance(tool, SamMasker2):
+            tool = self._current_tool()
+            if tool is not None:
                 scene_pos = self.mapToScene(event.position().toPoint())
-                point = (int(scene_pos.x()), int(scene_pos.y()))
-                tool.add_point(point, 0)
-            elif tool is None:
+                tool.right_click((int(scene_pos.x()), int(scene_pos.y())))
+            else:
                 # No tool active: right-click offers bulk class assignment
                 self._show_mask_context_menu(event)
 
@@ -493,24 +629,19 @@ class ImageDisplay(QGraphicsView):
         if self._edit_mode is not None and self._edit_mode.mouse_move(point):
             return
 
-        tool = self.parent.tool_manager.current_tool
-        if isinstance(tool, IntelligentScissors) and getattr(tool, "seed_points", None):
-            tool.update_dynamic_path((self.x, self.y))
-
-        if isinstance(tool, SamMasker2) and getattr(tool, "is_drawing_box", False):
-            tool.update_box_preview(tool.box_start, point)
+        tool = self._current_tool()
+        if tool is not None:
+            tool.mouse_move(point)
 
     def mouseReleaseEvent(self, event):
         if self._edit_mode is not None and self._edit_mode.mouse_release(event.button()):
             return
 
         if event.button() == Qt.MouseButton.LeftButton:
-            tool = self.parent.tool_manager.current_tool
-            if isinstance(tool, SamMasker2) and getattr(tool, "is_drawing_box", False):
+            tool = self._current_tool()
+            if tool is not None:
                 scene_pos = self.mapToScene(event.position().toPoint())
-                point = (int(scene_pos.x()), int(scene_pos.y()))
-                tool.add_box(tool.box_start, point)
-                tool.is_drawing_box = False
+                tool.left_release((int(scene_pos.x()), int(scene_pos.y())))
 
         if event.button() == Qt.MouseButton.MiddleButton:
             self._is_panning = False
@@ -525,14 +656,12 @@ class ImageDisplay(QGraphicsView):
         """Deselect all masks (highlight overlay + annotations table)."""
         self.highlighted_mask_ids = []
         self.highlight_selected_masks([])
-
-        annotations = getattr(self.parent, "annotations", None)
-        if annotations is not None:
-            annotations.table.clearSelection()
+        self.table_selection_cleared.emit()
 
     def _select_masks(self, selected_mask_ids, skip_already_selected=False):
         """
-        Add mask ids to the highlight selection and sync the annotations table.
+        Add mask ids to the highlight selection and select them in the
+        annotations table (see MaskResultsDock.select_mask_ids).
 
         Matching rows are TOGGLED, as selectRow() does in MultiSelection mode,
         so rows that are already selected flip off. Click-selection relies on
@@ -546,43 +675,10 @@ class ImageDisplay(QGraphicsView):
                 self.highlighted_mask_ids.append(mask_id)
         self.highlight_selected_masks(self.highlighted_mask_ids)
 
-        # Ensure results dialog is open
-        if not hasattr(self.parent, 'annotations') or self.parent.annotations is None:
-            self.parent.show_results()
-
-        table = self.parent.annotations.table
-        table.setSelectionMode(QTableWidget.SelectionMode.MultiSelection)
-        model = table.model()
-        sel_model = table.selectionModel()
-        wanted = {str(mask_id) for mask_id in selected_mask_ids}
-        last_column = max(model.columnCount() - 1, 0)
-
-        toggle = QItemSelection()
-        last_toggled_row = None
-        selected_rows = []
-        for row in range(table.rowCount()):
-            table_mask_id = table.item(row, 1).text()
-            if table_mask_id in wanted:
-                already = sel_model.isSelected(model.index(row, 0))
-                if not (skip_already_selected and already):
-                    toggle.select(model.index(row, 0), model.index(row, last_column))
-                    last_toggled_row = row
-                selected_rows.append({
-                    "image_name": table.item(row, 0).text(),
-                    "mask_id": table_mask_id,
-                    "class": table.item(row, 3).text(),
-                })
-
-        if last_toggled_row is not None:
-            sel_model.select(toggle, QItemSelectionModel.SelectionFlag.Toggle
-                             | QItemSelectionModel.SelectionFlag.Rows)
-            # Like selectRow(): the last toggled row becomes current, which
-            # scrolls the table to it.
-            sel_model.setCurrentIndex(model.index(last_toggled_row, 0),
-                                      QItemSelectionModel.SelectionFlag.NoUpdate)
-
-        if selected_rows:
-            self.parent.annotations.masks_selected.emit(selected_rows)
+        # The window opens the annotations table if needed and selects the
+        # rows there; the table then reports its whole selection back
+        # (set_highlighted_masks), which sets the outlines.
+        self.select_in_table.emit([str(m) for m in selected_mask_ids], skip_already_selected)
 
     def _show_mask_context_menu(self, event):
         """Right-click on the image: bulk class assignment for the selected masks."""
@@ -599,26 +695,21 @@ class ImageDisplay(QGraphicsView):
         menu = MaskContextMenu(self.parent, rows, parent=self)
         menu.exec(event.globalPosition().toPoint())
 
-    def _rebuild_mask_index(self):
+    def _rebuild_mask_index(self, masks=None):
         """Cache mask_id -> polygon(int32) for fast highlight path."""
         self._mask_index.clear()
         self._mask_outlines.clear()
-        masks = self.parent.state_manager.mask_manager.load_masks(
-            self.parent.state_manager.current_image_name
-        )
+        if masks is None:
+            masks = self.parent.state_manager.mask_manager.load_masks(
+                self.parent.state_manager.current_image_name
+            )
         for mask_id, mask, *_ in masks:
             if mask.shape[0] >= 3:
                 self._mask_index[str(mask_id)] = mask.astype(np.int32)
 
     def _set_base_pixmap(self, image_rgb):
-        """Upload base image once."""
-        h, w, ch = image_rgb.shape
-        q_image = QImage(image_rgb.data, w, h, ch * w, QImage.Format.Format_RGB888)
-        self.pixmap_item.setPixmap(QPixmap.fromImage(q_image))
-
-    def _update_pixmap(self, image):
-        """(kept for compatibility, but base is uploaded via _set_base_pixmap)"""
-        self._set_base_pixmap(image)
+        """Show this RGB array (shared with the view, not copied)."""
+        self.pixmap_item.set_array(image_rgb)
 
     def get_clicked_masks(self, click_point):
         """Use cached polygons for hit-test; no DB calls."""

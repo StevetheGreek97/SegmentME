@@ -4,17 +4,18 @@ import weakref
 import numpy as np
 from PyQt6.QtGui import QPen, QColor, QPolygonF
 from PyQt6.QtWidgets import QGraphicsEllipseItem, QGraphicsPolygonItem, QGraphicsRectItem
-from PyQt6.QtCore import pyqtSignal, QObject, QPointF, QRectF, Qt
+from PyQt6.QtCore import QPointF, QRectF, Qt
 from sam2.sam2_image_predictor import SAM2ImagePredictor
 import torch
 import cv2
+from core.tools.base import MaskTool
 from core.tools.sam2_loader import load_sam2_model
 from services.logger import get_logger
 
 logger = get_logger(__name__)
 
 
-class SamMasker2(QObject):
+class SamMasker2(MaskTool):
     """
     A class for creating masks interactively using the SAM 2 model.
 
@@ -28,7 +29,8 @@ class SamMasker2(QObject):
     tool therefore runs SAM on a full-resolution window around the prompts
     instead of the whole image (see generate_mask).
     """
-    mask_added = pyqtSignal(str, np.ndarray)
+    label = "SAM"
+    segments_on_e = True     # E runs SAM on a worker thread (see the image view)
 
     # Side of the window SAM looks at, in image pixels: SAM2's input size, so
     # a window this big is segmented at the image's own resolution.
@@ -37,18 +39,17 @@ class SamMasker2(QObject):
     # object bigger than the window); after that the result is used as is.
     MAX_WINDOW_GROWTH = 3
 
-    def __init__(self, parent, device: str = "cpu", variant=None):
+    def __init__(self, host, device: str = "cpu", variant=None):
         """
         Initialize the Sam2 class.
 
         Args:
-            parent: Reference to the parent ImageDisplay instance.
+            host: the app as tools see it (core/tools/base.py).
             device (str): Device to run the model on ('cpu' or 'cuda').
             variant: Optional sam_registry.SamVariant choosing which
                 SAM2-family checkpoint to load (default: SAM2 Tiny).
         """
-        super().__init__()
-        self.parent = parent
+        super().__init__(host)
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
         self.variant = variant
 
@@ -77,6 +78,29 @@ class SamMasker2(QObject):
         self._embedded_window = None  # (x0, y0, x1, y1)
         self._object_window_side = None  # window side the current object needed
 
+    # -------------------------------------------------------------- input
+    def left_click(self, point, ctrl=False):
+        if ctrl:                                  # Ctrl + left drag: box prompt
+            self.box_start = point
+            self.is_drawing_box = True
+        else:
+            self.add_point(point, 1)
+
+    def right_click(self, point):
+        self.add_point(point, 0)
+
+    def mouse_move(self, point):
+        if self.is_drawing_box:
+            self.update_box_preview(self.box_start, point)
+
+    def left_release(self, point):
+        if self.is_drawing_box:
+            self.add_box(self.box_start, point)
+            self.is_drawing_box = False
+
+    def current_polygon(self):
+        return self.mask
+
     def _load_model(self):
         """Load the SAM 2 model once."""
         return SAM2ImagePredictor(load_sam2_model(self.device, self.variant))
@@ -89,7 +113,7 @@ class SamMasker2(QObject):
         ellipse = QGraphicsEllipseItem(point[0] - 2, point[1] - 2, 4, 4)
         ellipse.setPen(pen)
         ellipse.setBrush(color)
-        self.parent.scene.addItem(ellipse)
+        self.scene.addItem(ellipse)
 
         return ellipse
 
@@ -140,12 +164,12 @@ class SamMasker2(QObject):
         rect = QRectF(x1, y1, x2 - x1, y2 - y1)
         self.box_item = QGraphicsRectItem(rect)
         self.box_item.setPen(pen)
-        self.parent.scene.addItem(self.box_item)
+        self.scene.addItem(self.box_item)
 
     def clear_box(self):
         """Remove any existing bounding box."""
         if self.box_item:
-            self.parent.scene.removeItem(self.box_item)
+            self.scene.removeItem(self.box_item)
             self.box_item = None
         self.box = None
 
@@ -159,7 +183,7 @@ class SamMasker2(QObject):
             line_width (int): Width of the polygon lines.
         """
         if self.current_polygon_item:
-            self.parent.scene.removeItem(self.current_polygon_item)
+            self.scene.removeItem(self.current_polygon_item)
             self.current_polygon_item = None
 
         if not polygon_points:
@@ -172,7 +196,7 @@ class SamMasker2(QObject):
 
         polygon_item = QGraphicsPolygonItem(polygon)
         polygon_item.setPen(pen)
-        self.parent.scene.addItem(polygon_item)
+        self.scene.addItem(polygon_item)
 
         self.current_polygon_item = polygon_item
         self.mask = None
@@ -186,16 +210,22 @@ class SamMasker2(QObject):
         the window's edge (inside the image), the window doubles and SAM runs
         again, up to MAX_WINDOW_GROWTH times.
 
-        Args:
-            image (numpy.ndarray): The input image for mask generation.
+        Runs everything here; the E key uses mask_job() + compute_polygon()
+        on a worker thread and apply_polygon() back on the GUI thread instead.
 
         Returns:
             numpy.ndarray: Generated mask polygon (Nx2, image coordinates).
         """
+        job = self.mask_job()
+        if job is None:
+            return None
+        return self.apply_polygon(*self.compute_polygon(image, *job))
+
+    def mask_job(self):
+        """The current prompts as (points, labels, box), or None without any."""
         if self.box is None and not self.foreground_points:
             logger.warning("Cannot generate mask: no box or foreground points added")
             return None
-
         points = np.array(self.foreground_points + self.background_points,
                           dtype=np.float32).reshape(-1, 2)
         labels = np.array([1] * len(self.foreground_points) + [0] * len(self.background_points),
@@ -204,7 +234,12 @@ class SamMasker2(QObject):
         if self.box is not None:  # as dragged; SAM wants top-left, bottom-right
             x1, y1, x2, y2 = (float(v) for v in self.box)
             box = np.array([min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2)], dtype=np.float32)
+        return points, labels, box
 
+    def compute_polygon(self, image, points, labels, box):
+        """The model part (seconds on a CPU): (polygon, window side used).
+        Touches no Qt objects, so it can run on a worker thread -- one call
+        at a time, as the predictor holds one embedding."""
         side = self._initial_window_side(points, box)
         for growth in range(self.MAX_WINDOW_GROWTH + 1):
             window = self._window_for(image, points, box, side)
@@ -215,16 +250,18 @@ class SamMasker2(QObject):
                 break
             side *= 2
             logger.debug("SAM mask reaches the window edge; retrying with a %d px window", side)
-        self._object_window_side = side
 
         contours, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL,
                                        cv2.CHAIN_APPROX_SIMPLE, offset=window[:2])
         # The largest piece is the object; SAM often adds specks around it.
         polygon = max(contours, key=cv2.contourArea).squeeze(axis=1).tolist() if contours else []
+        return polygon, side
 
+    def apply_polygon(self, polygon, side):
+        """Show the result (GUI thread)."""
+        self._object_window_side = side
         self.display_polygon(polygon)
         self.mask = np.array(polygon, dtype=np.float32)
-
         return self.mask
 
     # ------------------------------------------------------------ windowing
@@ -312,7 +349,7 @@ class SamMasker2(QObject):
         Clear temporary points, lines, and polygons.
         """
         for item in self.foreground_items + self.background_items:
-            self.parent.scene.removeItem(item)
+            self.scene.removeItem(item)
 
         self.foreground_items.clear()
         self.background_items.clear()
@@ -324,34 +361,9 @@ class SamMasker2(QObject):
         self.box_start = None
 
         if self.current_polygon_item:
-            self.parent.scene.removeItem(self.current_polygon_item)
+            self.scene.removeItem(self.current_polygon_item)
             self.current_polygon_item = None
 
         self.mask = None
         self._object_window_side = None  # the next object starts with a fresh window size
         logger.debug("Cleared temporary items")
-
-    def complete_mask(self):
-        """
-        Save the generated mask to the database.
-        """
-        if self.mask is None or self.mask.shape[0] == 0:
-            logger.warning("No mask to save; press E to generate one first")
-            return
-
-        if self.mask.ndim != 2 or self.mask.shape[1] != 2:
-            logger.error("Invalid mask shape %s (expected Nx2); not saved", self.mask.shape)
-            return
-        if not self.parent.parent.sidebar.has_valid_class_selection():
-            self.clear_temp_items()
-            return  # Cancel saving if no valid class is selected
-
-        image_name = self.parent.parent.state_manager.current_image_name
-        class_name, selected_color = self.parent.parent.sidebar.get_selected_class_color()
-
-        self.parent.parent.state_manager.mask_manager.save_mask(self.mask, image_name, class_name)
-
-        self.mask_added.emit(image_name, self.mask)
-        logger.info("Saved %s mask (%d points) for image %s as class %r",
-                    type(self).__name__, self.mask.shape[0], image_name, class_name)
-        self.clear_temp_items()

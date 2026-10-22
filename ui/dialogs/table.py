@@ -5,13 +5,16 @@ from PyQt6.QtWidgets import (
     QTableView, QComboBox, QAbstractItemView, QStyledItemDelegate
 )
 from ui.custom_components.mask_context_menu import MaskContextMenu
-from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QModelIndex, QSortFilterProxyModel
+from PyQt6.QtCore import (Qt, pyqtSignal, QTimer, QModelIndex, QSortFilterProxyModel,
+                          QItemSelection, QItemSelectionModel)
 from PyQt6.QtGui import QIcon, QPixmap, QColor
 
 import time
 from contextlib import contextmanager
 
 from services.logger import get_logger
+from core.measure.cache import measure_cached
+from core.measure.morphometrics import to_units
 
 logger = get_logger(__name__)
 
@@ -26,7 +29,6 @@ class _FakeItem:
     def text(self) -> str:
         return self._text
 
-from PyQt6.QtWidgets import QTableView
 class SelectionView(QTableView):
     """
     QTableView with a back-compat .selectedItems(), .rowCount(), and .item()
@@ -73,20 +75,25 @@ def _t(section, bucket: dict):
 
 
 # ----------------------------- Table Model -----------------------------------
+SORT_ROLE = Qt.ItemDataRole.UserRole + 1
 class MaskTableModelData:
     """
     Simple row container to keep the code readable.
     """
-    __slots__ = ("image_name", "mask_id", "surface_area", "klass")
+    __slots__ = ("image_name", "mask_id", "surface_area", "klass", "length", "width")
 
-    def __init__(self, image_name: str, mask_id: int, surface_area: float | None, klass: str | None):
+    def __init__(self, image_name: str, mask_id: int, surface_area: float | None, klass: str | None,
+                 length: float | None = None, width: float | None = None):
         self.image_name = image_name
         self.mask_id = int(mask_id)
+        # area, length and width are in the table's unit (mm / µm, or px without a scale)
         self.surface_area = 0.0 if surface_area is None else float(surface_area)
         self.klass = "" if klass is None else str(klass)
+        self.length = length
+        self.width = width
 
 
-from PyQt6.QtCore import QAbstractTableModel, QVariant
+from PyQt6.QtCore import QAbstractTableModel
 
 
 class MaskTableModel(QAbstractTableModel):
@@ -96,29 +103,50 @@ class MaskTableModel(QAbstractTableModel):
     """
     classChanged = pyqtSignal(str, int, str)  # image_name, mask_id, new_class
 
-    HEADERS = ["Image Name", "Mask ID", "Surface Area", "Class"]
+    HEADERS = ["Image Name", "Mask ID", "Area", "Class", "Length", "Width"]
 
     COL_IMAGE = 0
     COL_ID = 1
     COL_AREA = 2
     COL_CLASS = 3
+    COL_LENGTH = 4
+    COL_WIDTH = 5
+    NUMERIC = (COL_ID, COL_AREA, COL_LENGTH, COL_WIDTH)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._rows: list[MaskTableModelData] = []
+        self._unit = "px"     # "mm", "µm" or "px" (no scale for this image)
+
+    def set_unit(self, unit: str):
+        if unit != self._unit:
+            self._unit = unit
+            self.headerDataChanged.emit(Qt.Orientation.Horizontal, 0, len(self.HEADERS) - 1)
+
+    def _number(self, value, area=False):
+        if value is None:
+            return ""
+        if self._unit == "px":
+            return f"{value:.0f}" if area else f"{value:.1f}"
+        return f"{value:.4g}"
 
     # ---------------- required overrides -----------------
     def rowCount(self, parent=QModelIndex()):
         return 0 if parent.isValid() else len(self._rows)
 
     def columnCount(self, parent=QModelIndex()):
-        return 0 if parent.isValid() else 4
+        return 0 if parent.isValid() else len(self.HEADERS)
 
     def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):
         if role != Qt.ItemDataRole.DisplayRole:
             return None
         if orientation == Qt.Orientation.Horizontal:
-            return self.HEADERS[section]
+            name = self.HEADERS[section]
+            if section == self.COL_AREA:
+                return f"{name} ({self._unit}²)"
+            if section in (self.COL_LENGTH, self.COL_WIDTH):
+                return f"{name} ({self._unit})"
+            return name
         return section + 1
 
     def data(self, index: QModelIndex, role=Qt.ItemDataRole.DisplayRole):
@@ -133,23 +161,37 @@ class MaskTableModel(QAbstractTableModel):
             elif c == self.COL_ID:
                 return str(row.mask_id)
             elif c == self.COL_AREA:
-                return f"{row.surface_area:.2f}"
+                return self._number(row.surface_area, area=True)
             elif c == self.COL_CLASS:
                 return row.klass
+            elif c == self.COL_LENGTH:
+                return self._number(row.length)
+            elif c == self.COL_WIDTH:
+                return self._number(row.width)
+
+        # Sorting: numbers as numbers (the proxy sorts on SORT_ROLE)
+        if role == SORT_ROLE:
+            values = {self.COL_IMAGE: row.image_name, self.COL_ID: row.mask_id,
+                      self.COL_AREA: row.surface_area, self.COL_CLASS: row.klass.lower(),
+                      self.COL_LENGTH: row.length, self.COL_WIDTH: row.width}
+            value = values.get(c)
+            return -1.0 if value is None else value
 
         # Center numeric columns visually
-        if role == Qt.ItemDataRole.TextAlignmentRole and c in (self.COL_ID, self.COL_AREA):
+        if role == Qt.ItemDataRole.TextAlignmentRole and c in self.NUMERIC:
             return int(Qt.AlignmentFlag.AlignCenter)
 
         return None
 
+    # Built once: Qt asks for every cell when selecting (90,000 calls for "select
+    # all" on 5,000 rows), and combining enum flags in Python each time added up.
+    _FLAGS = Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled
+    _FLAGS_EDITABLE = _FLAGS | Qt.ItemFlag.ItemIsEditable
+
     def flags(self, index: QModelIndex):
         if not index.isValid():
             return Qt.ItemFlag.NoItemFlags
-        base = Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled
-        if index.column() == self.COL_CLASS:
-            return base | Qt.ItemFlag.ItemIsEditable
-        return base
+        return self._FLAGS_EDITABLE if index.column() == self.COL_CLASS else self._FLAGS
 
     def setData(self, index: QModelIndex, value, role=Qt.ItemDataRole.EditRole):
         if role != Qt.ItemDataRole.EditRole or not index.isValid():
@@ -323,6 +365,7 @@ class MaskResultsDock(QDockWidget):
         self._model = MaskTableModel(self.table)
         self._proxy = MaskFilterProxy(self.table)
         self._proxy.setSourceModel(self._model)
+        self._proxy.setSortRole(SORT_ROLE)
         self.table.setModel(self._proxy)
 
         # Delegate for column 3 (Class) — uses a lambda so it always reads the current cache
@@ -379,12 +422,41 @@ class MaskResultsDock(QDockWidget):
         return cache
 
     def _commit_class_change(self, image_name: str, mask_id: int, new_class: str):
-        # Persist to DB
+        # The image and the statistics redraw themselves (masks_updated)
         self.parent.state_manager.mask_manager.rename_mask(image_name, mask_id, new_class)
-        # Light refreshes
-        self.parent.image_display.refresh_masks()
-        if hasattr(self.parent, 'statistics') and self.parent.statistics.isVisible():
-            self.parent.statistics.refresh_plot()
+
+    def select_mask_ids(self, mask_ids, skip_already_selected=False):
+        """Select the rows of these masks (clicked on the image).
+
+        Matching rows are TOGGLED, as selectRow() does in MultiSelection mode,
+        so rows that are already selected flip off. Click-selection relies on
+        that toggle to deselect; bulk selection (e.g. "Select all") passes
+        skip_already_selected=True to leave selected rows untouched. All rows
+        change in one selection update, so the outlines refresh once (the
+        selection change reports the whole selection: masks_selected)."""
+        table = self.table
+        table.setSelectionMode(QAbstractItemView.SelectionMode.MultiSelection)
+        model = table.model()
+        sel_model = table.selectionModel()
+        wanted = {str(mask_id) for mask_id in mask_ids}
+        last_column = max(model.columnCount() - 1, 0)
+
+        toggle = QItemSelection()
+        last_toggled_row = None
+        for row in range(table.rowCount()):
+            if table.item(row, 1).text() in wanted:
+                already = sel_model.isSelected(model.index(row, 0))
+                if not (skip_already_selected and already):
+                    toggle.select(model.index(row, 0), model.index(row, last_column))
+                    last_toggled_row = row
+
+        if last_toggled_row is not None:
+            sel_model.select(toggle, QItemSelectionModel.SelectionFlag.Toggle
+                             | QItemSelectionModel.SelectionFlag.Rows)
+            # Like selectRow(): the last toggled row becomes current, which
+            # scrolls the table to it.
+            sel_model.setCurrentIndex(model.index(last_toggled_row, 0),
+                                      QItemSelectionModel.SelectionFlag.NoUpdate)
 
     # ------------------------------ Context menu / bulk class assign ---------
     def _selected_rows_data(self) -> list[tuple[str, int]]:
@@ -428,12 +500,20 @@ class MaskResultsDock(QDockWidget):
                     # expected tuples: (mask_id, _mask, class_name, surface_area)
 
                 with _t("build_rows", stats):
-                    rows = [MaskTableModelData(
-                        image_name=image_name,
-                        mask_id=mask_id,
-                        surface_area=surface_area,
-                        klass=class_name
-                    ) for (mask_id, _mask, class_name, surface_area) in masks]
+                    um, unit, unit_um = self._image_scale()
+                    rows = []
+                    for (mask_id, mask, class_name, surface_area) in masks:
+                        px = measure_cached(mask)
+                        if px is None:   # no area: keep the stored value
+                            area, length, width = surface_area, None, None
+                        elif um:
+                            real = to_units(px, um, unit_um)
+                            area, length, width = real["area"], real["length"], real["width"]
+                        else:
+                            area, length, width = px["area"], px["length"], px["width"]
+                        rows.append(MaskTableModelData(image_name, mask_id, area, class_name,
+                                                       length, width))
+                    self._model.set_unit(unit if um else "px")
                     self._model.set_rows(rows)
 
                 # Keep sort if user clicked a header previously
@@ -451,6 +531,13 @@ class MaskResultsDock(QDockWidget):
         ms = lambda k: stats.get(k, 0.0) * 1000.0
         logger.debug("Table refresh: total=%.2f ms (load=%.2f, build=%.2f, filters=%.2f)",
                      ms('total'), ms('load_masks'), ms('build_rows'), ms('apply_filters'))
+
+    def _image_scale(self):
+        """(µm per pixel or None, unit, µm per unit) for the image on screen."""
+        try:
+            return self.parent.current_image_scale()
+        except Exception:
+            return None, "px", 1.0
 
     # ------------------------------ Selection & filters -----------------------
     def _refresh_class_filter(self):

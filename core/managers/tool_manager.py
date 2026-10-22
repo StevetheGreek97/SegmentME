@@ -9,7 +9,7 @@ from services import model_store
 from ui.dialogs.model_manager_dialog import ensure_model_available
 from core.tools.sam2_masker import SamMasker2
 from core.tools.sam3_masker import Sam3Masker
-from core.tools.intellignent_scissors import IntelligentScissors
+from core.tools.intelligent_scissors import IntelligentScissors
 from core.tools.dextr_mask import DEXTRMasker
 from services.logger import get_logger
 
@@ -51,26 +51,25 @@ class ToolManager:
 
         error = None
         try:
+            host = self.parent.image_display.tool_host
             if tool == "manual_mask":
-                self.current_tool = ManualMask(self.parent.image_display)
+                self.current_tool = ManualMask(host)
             elif tool == "sam":
                 variant = spec
                 logger.info("SAM tool using variant %r", variant.key)
                 if variant.family == "sam3":
-                    self.current_tool = Sam3Masker(self.parent.image_display)
+                    self.current_tool = Sam3Masker(host)
                 else:
-                    self.current_tool = SamMasker2(self.parent.image_display,
-                                                   variant=variant)
+                    self.current_tool = SamMasker2(host, variant=variant)
             elif tool == "dextr":
-                self.current_tool = DEXTRMasker(self.parent.image_display)
+                self.current_tool = DEXTRMasker(host)
             elif tool == "intelligent_scissors":
-                self.current_tool = IntelligentScissors(self.parent.image_display)
-                self.current_tool.set_image(self.parent.state_manager.current_image)
+                self.current_tool = IntelligentScissors(host)   # edges made on the first click
             else:
                 logger.warning("Unknown tool requested: %r", tool)
 
             if self.current_tool:
-                self.current_tool.mask_added.connect(self.parent.image_display.refresh_overlay)
+                # a saved mask redraws the image through masks_updated
                 logger.info("Enabled tool: %s", tool)
         except Exception as exc:
             logger.exception("Failed to enable tool %r (model load error?)", tool)

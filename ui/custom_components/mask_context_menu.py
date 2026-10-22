@@ -139,17 +139,9 @@ class MaskContextMenu(QMenu):
     # ------------------------------ actions ---------------------------------
     def _assign_class(self, new_class: str):
         """Assign new_class to all rows in a single transaction."""
-        db = self.state.db
-        with db.transaction():
-            for image_name, mask_id in self.rows:
-                db.execute_query(
-                    "UPDATE masks SET class_name = ? WHERE image_name = ? AND id = ?",
-                    (new_class, image_name, mask_id),
-                )
-
-        # One coalesced refresh instead of one signal per mask
-        self.state.masks_updated.emit()
-        self.main_window.image_display.refresh_masks()
+        # one transaction, one masks_updated: the image, table and
+        # statistics then redraw themselves
+        self.state.mask_manager.assign_class(self.rows, new_class)
 
     def _start_split(self):
         _, mask_id = self.rows[0]
@@ -176,8 +168,7 @@ class MaskContextMenu(QMenu):
         for image_name, mask_ids in by_image.items():
             self.state.mask_manager.delete_masks(image_name, mask_ids, profile=False)
 
-        self._clear_selection()
-        self.main_window.image_display.refresh_masks()
+        self._clear_selection()   # the image redraws itself (masks_updated)
 
     # ------------------------------ styling ---------------------------------
     def _apply_styles(self):

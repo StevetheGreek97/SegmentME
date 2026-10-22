@@ -1,6 +1,6 @@
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QLabel, QComboBox,
-    QPushButton, QFileDialog, QHBoxLayout
+    QPushButton, QHBoxLayout
 )
 from PyQt6.QtCore import Qt
 from ui.custom_components.custom_slider import ColorRangeSlider 

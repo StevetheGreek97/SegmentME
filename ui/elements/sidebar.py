@@ -3,7 +3,6 @@ from PyQt6.QtWidgets import (
     QInputDialog, QMessageBox, QFrame, QLabel, QSizePolicy, QSpacerItem
 )
 from PyQt6.QtCore import QSize, Qt
-from PyQt6.QtGui import QColor
 import qtawesome as qta
 import re
 from core.tools import sam_registry
@@ -59,6 +58,10 @@ class Sidebar(QWidget):
 
         # Apply styles last
         self._apply_styles()
+
+        # Classes added, removed or recoloured anywhere (here, inference,
+        # Import Annotations): refresh the list
+        self.parent.state_manager.classes_changed.connect(self.populate_class_dropdown)
 
     # ----------------------------------------------------------------------
     # Sections & helpers
@@ -281,9 +284,9 @@ class Sidebar(QWidget):
             logger.debug("Add class cancelled: no color selected")
             return
 
-        self.parent.state_manager.class_manager.add_class(class_name, color)
+        self.parent.state_manager.class_manager.add_class(class_name, color)   # list refreshes itself
         logger.info("Added class %r (%s)", class_name, color.name())
-        self.populate_class_dropdown()
+        self.class_dropdown.setCurrentIndex(self.class_dropdown.findText(class_name))
         self._sync_classes_to_seproj()
 
 
@@ -313,10 +316,9 @@ class Sidebar(QWidget):
         self.parent.state_manager.mask_manager.delete_masks_by_class(class_name)
         self.parent.state_manager.class_manager.reindex_classes()
 
-        self.class_dropdown.removeItem(current_index)
         logger.info("Removed class %r and its %d mask(s)", class_name, count)
         self._sync_classes_to_seproj()
-        self.parent.image_display.display_image(self.parent.state_manager.current_image_path, preserve_zoom=True)
+        # the class list and the image redraw themselves (classes_changed)
 
     def pick_class_color(self):
         color = QColorDialog.getColor()
@@ -333,13 +335,15 @@ class Sidebar(QWidget):
         seproj_update_classes(project_root, classes)
 
     def populate_class_dropdown(self):
+        """Fill the class list from the database, keeping the chosen class
+        selected when it still exists. Runs whenever classes change."""
         class_manager = self.parent.state_manager.class_manager
         class_names = class_manager.get_all_class_names()
+        chosen = self.class_dropdown.currentText()
         self.class_dropdown.clear()
-        if not class_names:
-            logger.debug("No classes defined yet; dropdown left empty")
-            return
         self.class_dropdown.addItems(class_names)
+        if chosen in class_names:
+            self.class_dropdown.setCurrentIndex(class_names.index(chosen))
         logger.debug("Loaded %d class(es) into the dropdown", len(class_names))
 
     def has_valid_class_selection(self):

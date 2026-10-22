@@ -1,7 +1,6 @@
 import json
 import random
 import shutil
-import cv2
 from pathlib import Path
 from PyQt6.QtWidgets import QMessageBox
 from core.exporters.base_exporter import BaseExporter
@@ -12,12 +11,12 @@ logger = get_logger(__name__)
 
 class COCOExporter(BaseExporter):
     def set_export_dir(self):
-        base_dir = Path(self.parent.state_manager.project_root) / "labels_coco"
+        base_dir = Path(self.state.project_root) / "labels_coco"
         base_dir.mkdir(parents=True, exist_ok=True)
         return base_dir
 
     def export_all_annotations(self, train_pct, val_pct, test_pct):
-        image_paths = self.parent.state_manager.image_paths
+        image_paths = self.state.image_paths
         if not image_paths:
             logger.warning("Export requested with no images loaded; ignoring")
             return
@@ -48,6 +47,11 @@ class COCOExporter(BaseExporter):
         progress_dialog = self._show_progress_dialog(len(image_paths))
         logger.info("Exporting COCO annotations for %d image(s) to %s (split %d/%d/%d)",
                     len(image_paths), self.export_dir, train_pct, val_pct, test_pct)
+        self._sizes = self._read_image_sizes(image_paths, progress_dialog)
+        if self._sizes is None:            # cancelled
+            progress_dialog.close()
+            return
+        progress_dialog.setMaximum(len(image_paths))
 
         image_id = 1
         annotation_id = 1
@@ -96,17 +100,14 @@ class COCOExporter(BaseExporter):
         return assignments
 
     def _build_categories(self):
-        class_manager = self.parent.state_manager.class_manager
+        class_manager = self.state.class_manager
         return [
             {"id": class_manager.get_idx_by_name(name), "name": name, "supercategory": "object"}
             for name in class_manager.get_all_class_names()
         ]
 
     def _process_image(self, image_path: Path, doc, image_id: int, annotation_id: int):
-        image = cv2.imread(str(image_path))
-        if image is None:
-            raise ValueError(f"Failed to load image: {image_path}")
-        h, w = image.shape[:2]
+        w, h = self._size_of(self._sizes, image_path)   # header only, read in advance
 
         doc["images"].append({
             "id": image_id,
@@ -115,8 +116,8 @@ class COCOExporter(BaseExporter):
             "height": h,
         })
 
-        class_manager = self.parent.state_manager.class_manager
-        masks = self.parent.state_manager.mask_manager.load_masks(image_path.stem)
+        class_manager = self.state.class_manager
+        masks = self.state.mask_manager.load_masks(image_path.stem)
 
         for mask_id, mask_array, class_name, surface_area in masks:
             if mask_array is None or len(mask_array) < 3:

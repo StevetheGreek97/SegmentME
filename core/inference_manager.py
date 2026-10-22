@@ -77,13 +77,7 @@ class InferenceManager(QObject):
         self._worker_pid = None
 
         # Coalesce UI updates coming from many images
-        self._ui_refresh_timer = QTimer(self)
-        self._ui_refresh_timer.setSingleShot(True)
-        self._ui_refresh_timer.timeout.connect(self._do_ui_refresh)
 
-        self._need_overlay_refresh = False
-        self._need_stats_refresh = False
-        self._need_class_dropdown_refresh = False
 
     def run_inference(self, model_path, image_files, conf, dims, sam_variant_key=None,
                       hires_params=None):
@@ -278,8 +272,7 @@ class InferenceManager(QObject):
             self.progress_manager.update_progress(self._processed)
 
     def _save_result(self, image_path, masks, class_names):
-        """Called once per image from worker stdout. Save to DB, flag what
-        needs UI refresh, then schedule one coalesced UI pass."""
+        """Called once per image from worker stdout: save to the database."""
         image_name = os.path.splitext(os.path.basename(image_path))[0]
 
         for mask, class_name in zip(masks, class_names):
@@ -290,32 +283,8 @@ class InferenceManager(QObject):
             if class_name not in self.parent.state_manager.class_manager.get_all_class_names():
                 rand = QColor(random.randint(0, 255), random.randint(0, 255), random.randint(0, 255))
                 self.parent.state_manager.class_manager.add_class(class_name, rand)
-                self._need_class_dropdown_refresh = True
-
-        self._need_overlay_refresh = True
-        self._need_stats_refresh = True
-        self._ui_refresh_timer.start(60)
-
-    def _do_ui_refresh(self):
-        # The docks exist as attributes from the start but stay None until
-        # File -> Annotations opens them, so check for None, not hasattr.
-        sidebar = getattr(self.parent, "sidebar", None)
-        image_display = getattr(self.parent, "image_display", None)
-        statistics = getattr(self.parent, "statistics", None)
-        annotations = getattr(self.parent, "annotations", None)
-
-        if self._need_class_dropdown_refresh and sidebar is not None:
-            sidebar.populate_class_dropdown()
-        if self._need_overlay_refresh and image_display is not None:
-            image_display.refresh_masks()
-        if self._need_stats_refresh and statistics is not None and statistics.isVisible():
-            statistics.refresh_plot()
-        if annotations is not None and annotations.isVisible():
-            annotations.refresh_table(delay_ms=80)
-
-        self._need_class_dropdown_refresh = False
-        self._need_overlay_refresh = False
-        self._need_stats_refresh = False
+        # The image view, class list, table and statistics listen to the
+        # state's masks_updated / classes_changed and refresh themselves.
 
     def _stop_if_still_running(self, process):
         """The worker reported a fatal error but did not exit: stop it.
