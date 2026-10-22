@@ -253,3 +253,45 @@ def test_bytes_to_copy(tmp_path, images_dir):
     srcs = [s for s, _ in jobs]
     assert image_files.bytes_to_copy(srcs, image_files.COPY) == sum(os.path.getsize(s) for s in srcs)
     assert image_files.bytes_to_copy(srcs, image_files.LINK) == 0
+
+
+def test_images_are_listed_in_natural_name_order(tmp_path):
+    """The same order on every computer, whatever order the file system
+    lists them in (it differs between Linux and Windows)."""
+    from services.file_handlers import loader
+    from tests.conftest import make_image
+    for name in ("img10.png", "IMG2.jpg", "b.tif", "img1.png", "A.png", "notes.txt"):
+        if name.endswith(".txt"):
+            (tmp_path / name).write_text("x")
+        else:
+            make_image(tmp_path / name)
+    names = [os.path.basename(p) for p in loader(str(tmp_path))]
+    assert names == ["A.png", "b.tif", "img1.png", "IMG2.jpg", "img10.png"]
+
+
+def test_read_image_never_raises(tmp_path, monkeypatch):
+    """Missing, empty or broken files give None -- also when cv2.imread has
+    been replaced by one that raises (ultralytics does that on Windows)."""
+    import cv2
+    from services.image_io import read_image
+    from tests.conftest import make_image
+
+    def raising_imread(*a, **k):
+        raise FileNotFoundError("ultralytics-style imread")
+    monkeypatch.setattr(cv2, "imread", raising_imread)
+    ok = make_image(tmp_path / "ünïcode folder" / "a.png", (30, 20))
+    assert read_image(ok).shape == (20, 30, 3)
+    assert read_image(tmp_path / "missing.png") is None
+    (tmp_path / "empty.png").write_bytes(b"")
+    assert read_image(tmp_path / "empty.png") is None
+    (tmp_path / "junk.png").write_bytes(b"not an image")
+    assert read_image(tmp_path / "junk.png") is None
+    if hasattr(os, "symlink"):
+        target = make_image(tmp_path / "t.png")
+        link = tmp_path / "link.png"
+        try:
+            os.symlink(target, link)
+        except OSError:
+            return                                  # no symlink rights (Windows)
+        target.unlink()
+        assert read_image(link) is None             # broken link: the "missing original" case

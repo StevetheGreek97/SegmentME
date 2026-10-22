@@ -37,6 +37,7 @@ import numpy as np
 import yaml
 from PIL import Image
 
+from services.image_io import read_image
 from services.logger import get_logger
 from services.pil_limits import large_images_allowed
 
@@ -303,7 +304,7 @@ def _image_size(path) -> Tuple[int, int]:
         except Exception:
             orientation = 1
     if orientation not in (1, None):
-        loaded = cv2.imread(str(path))  # rare: let OpenCV decide how it shows it
+        loaded = read_image(path)  # rare: let OpenCV decide how it shows it
         if loaded is not None:
             height, width = loaded.shape[:2]
     if width <= 0 or height <= 0:

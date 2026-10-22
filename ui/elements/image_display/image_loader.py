@@ -20,6 +20,7 @@ import cv2
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import QLabel
 
+from services.image_io import read_image
 from services.logger import get_logger
 from ui.elements.image_display import mask_render
 
@@ -28,7 +29,7 @@ logger = get_logger(__name__)
 
 def read_rgb(image_path):
     """The image file as an RGB array, or None. Thread-safe."""
-    image = cv2.imread(image_path)
+    image = read_image(image_path)
     return None if image is None else cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
 
