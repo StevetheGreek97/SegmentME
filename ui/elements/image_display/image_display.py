@@ -10,6 +10,7 @@ from core.tools.intellignent_scissors import IntelligentScissors
 from ui.custom_components.mask_context_menu import MaskContextMenu
 from ui.elements.image_display.edit_modes import SplitStrokeMode, BrushEditMode
 from services.logger import get_logger
+from services.image_files import missing_image_message
 import cv2
 import numpy as np
 import time
@@ -82,6 +83,10 @@ class ImageDisplay(QGraphicsView):
         # Active mask edit mode (split stroke / brush) — see edit_modes.py
         self._edit_mode = None
 
+        # Shown instead of the image when its file can't be opened (e.g. the
+        # original of a linked image was moved); drawing is off meanwhile.
+        self._missing_item = None
+
     # ---------- Public API ----------
 
     def display_image(self, image_path, preserve_zoom=False):
@@ -96,7 +101,9 @@ class ImageDisplay(QGraphicsView):
         image = cv2.imread(image_path)
         if image is None:
             logger.error("Failed to load image %s (missing or unreadable)", image_path)
+            self._show_missing_image(image_path)
             return
+        self._clear_missing_image()
 
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         self.parent.state_manager.current_image = image
@@ -349,7 +356,44 @@ class ImageDisplay(QGraphicsView):
             return True
         return self.transform().m11() < self._max_pixel_zoom
 
+    @property
+    def image_missing(self) -> bool:
+        """True while the current image's file can't be opened."""
+        return self._missing_item is not None
+
+    def _show_missing_image(self, image_path):
+        """Blank the view and say why, instead of leaving the previous image
+        on screen (annotations drawn on it would land on this image)."""
+        from PyQt6.QtGui import QPalette
+
+        self.cancel_edit_mode()
+        self._clear_missing_image()
+        self.parent.state_manager.current_image = None
+        self.cached_image_with_masks = None
+        self.highlighted_mask_ids = []
+        self.pixmap_item.setPixmap(QPixmap())
+        self.highlight_item.setPixmap(QPixmap())
+        self.highlight_item.setOffset(0, 0)
+        self.selection_item.setPath(QPainterPath())
+        self._mask_index, self._mask_outlines = {}, {}
+
+        self._missing_item = self.scene.addText(missing_image_message(image_path))
+        self._missing_item.setDefaultTextColor(self.palette().color(QPalette.ColorRole.WindowText))
+        self._missing_item.setTextWidth(520)
+        self._missing_item.setZValue(20)
+        self.resetTransform()
+        self._zoom_factor = 1.0
+        self.scene.setSceneRect(self._missing_item.boundingRect())
+        self.centerOn(self._missing_item)
+
+    def _clear_missing_image(self):
+        if self._missing_item is not None:
+            self.scene.removeItem(self._missing_item)
+            self._missing_item = None
+
     def keyPressEvent(self, event):
+        if self.image_missing and event.key() in (Qt.Key.Key_S, Qt.Key.Key_E):
+            return  # no image to draw on
         if self._edit_mode is not None and self._edit_mode.key_press(event):
             return
 
@@ -371,6 +415,9 @@ class ImageDisplay(QGraphicsView):
                 QApplication.restoreOverrideCursor()
 
     def mousePressEvent(self, event):
+        if self.image_missing and event.button() in (Qt.MouseButton.LeftButton,
+                                                     Qt.MouseButton.RightButton):
+            return  # no image to draw on or select masks in
         if event.button() == Qt.MouseButton.LeftButton:
             scene_pos = self.mapToScene(event.position().toPoint())
             point = (int(scene_pos.x()), int(scene_pos.y()))

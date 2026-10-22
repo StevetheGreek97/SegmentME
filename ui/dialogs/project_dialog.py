@@ -1,12 +1,14 @@
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QListWidget,
     QListWidgetItem, QFileDialog, QMessageBox, QLineEdit, QProgressBar,
-    QAbstractItemView, QStyle
+    QAbstractItemView, QStyle, QCheckBox
 )
 from PyQt6.QtCore import Qt, QSize
 from PyQt6.QtGui import QColor, QPalette
 from services.recent_projects import load_recent_projects, remove_recent_project, delete_project_and_remove_recent
 from ui.recent_item import RecentItemWidget
+from ui.dialogs.image_mode import ImageModeChoice
+from services import image_files
 import shutil, os, re, pathlib, platform, json
 from datetime import datetime
 
@@ -123,9 +125,17 @@ class DraggableImageList(QListWidget):
         for url in event.mimeData().urls():
             path = pathlib.Path(url.toLocalFile()).resolve()
             if path.is_file() and path.suffix.lower() in self.accepted_extensions:
-                if str(path) not in self.file_list:
-                    self.file_list.append(str(path))
-                    self.addItem(path.name)
+                self.add_file(path)
+
+    def add_file(self, path) -> bool:
+        """Add one image; False if an image with that file name is already
+        listed (names must be unique inside the project's images folder)."""
+        path = pathlib.Path(path)
+        if any(pathlib.Path(f).name.lower() == path.name.lower() for f in self.file_list):
+            return False
+        self.file_list.append(str(path))
+        self.addItem(path.name)
+        return True
 
 # ---------- Create Project sub-dialog ----------
 
@@ -167,6 +177,16 @@ class CreateProjectDialog(QDialog):
         self.img_list.setMinimumHeight(120)
         v.addWidget(self.img_list)
 
+        self.image_mode = ImageModeChoice(self)
+        v.addWidget(self.image_mode)
+
+        self.annotations_check = QCheckBox(
+            "Also import annotations for these images (.txt files + data.yaml)")
+        self.annotations_check.setToolTip(
+            "After the project is created, choose the folder with the YOLO .txt files; "
+            "each goes to the image with exactly the same name.")
+        v.addWidget(self.annotations_check)
+
         self.progress = QProgressBar()
         self.progress.setValue(0)
         v.addWidget(self.progress)
@@ -184,6 +204,7 @@ class CreateProjectDialog(QDialog):
         create_btn.clicked.connect(self._finalize)
 
         self.selected_project_db = None  # will be set on success
+        self.import_annotations = False  # open Import Annotations once the project is open
 
     def _default_desktop_path(self):
         system_platform = platform.system()
@@ -207,9 +228,7 @@ class CreateProjectDialog(QDialog):
         for f in files:
             p = pathlib.Path(f).resolve()
             if p.is_file() and p.suffix.lower() in self.img_list.accepted_extensions:
-                if str(p) not in self.img_list.file_list:
-                    self.img_list.file_list.append(str(p))
-                    self.img_list.addItem(p.name)
+                self.img_list.add_file(p)
 
     def _finalize(self):
         base_dir = pathlib.Path(self.path_input.text()).expanduser().resolve()
@@ -230,13 +249,15 @@ class CreateProjectDialog(QDialog):
             QMessageBox.warning(self, "Exists", "This project folder already exists.")
             return
 
+        mode = self.image_mode.mode()
+        placements = []
         try:
             (project_path / "images").mkdir(parents=True)
             (project_path / ".segmentme").mkdir(parents=True)
 
             for i, f in enumerate(self.img_list.file_list):
                 dest = project_path / "images" / pathlib.Path(f).name
-                shutil.copy(f, dest)
+                placements.append(image_files.place_image(f, dest, mode))
                 self.progress.setValue(int((i + 1) / max(1, len(self.img_list.file_list)) * 100))
 
             seproj_data = {
@@ -249,9 +270,17 @@ class CreateProjectDialog(QDialog):
                 json.dump(seproj_data, fh, indent=2)
 
             self.selected_project_db = str(project_path / ".segmentme" / "masks.db")
+            self.import_annotations = self.annotations_check.isChecked()
+            fallback = [how for how, reason in placements if how == image_files.COPIED and reason]
+            if mode == image_files.LINK and fallback:
+                QMessageBox.information(self, "Some images were copied",
+                                        image_files.summarize(placements))
             self.accept()
 
         except Exception as e:
+            # Don't leave a half-made project behind (it would block the name).
+            # Removing it deletes links only, never the original images.
+            shutil.rmtree(project_path, ignore_errors=True)
             QMessageBox.critical(self, "Error", str(e))
 
 # ---------- Minimal, elegant Start Dialog ----------
@@ -265,6 +294,7 @@ class ProjectStartupDialog(QDialog):
 
         self.selected_project_path = None
         self.is_new_project = None
+        self.import_annotations = False  # New Project asked to import annotations
 
         self.setStyleSheet(_build_stylesheet(self))
 
@@ -373,4 +403,5 @@ class ProjectStartupDialog(QDialog):
         if dlg.exec() == QDialog.DialogCode.Accepted:
             self.selected_project_path = dlg.selected_project_db
             self.is_new_project = True
+            self.import_annotations = dlg.import_annotations
             self.accept()

@@ -1,25 +1,27 @@
 """
-Review window for "Import Images with Annotations", and the final report.
+Review window for "Import Annotations", and the final report.
 
-The window scans the chosen dataset (core/importers/yolo_importer.py), shows
-what will happen -- counts, problems, and a class table where each class of the
-dataset is merged into a same-named project class or added as a new one (it
-can be renamed or merged into another existing class) -- and returns the scan
-and the chosen class names. The main window then runs the import.
+The window reads every .txt in the chosen folder and its subfolders
+(core/importers/yolo_importer.py) and matches each to the project image of the
+same name. It shows what will happen -- counts, problems, and a class table
+where each class of data.yaml is merged into a same-named project class or
+added as a new one (it can be renamed or merged into another existing class)
+-- and returns the scan and the chosen class names. The main window then runs
+the import. Images are never copied or changed here.
 """
 from pathlib import Path
 
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QColor, QFontDatabase, QIcon, QPixmap
 from PyQt6.QtWidgets import (
-    QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QGridLayout,
+    QAbstractItemView, QApplication, QComboBox, QDialog, QFileDialog, QGridLayout,
     QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QProgressDialog,
     QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout,
 )
 
 from core.importers.yolo_importer import (
-    CLASS_NAME_RE, ImportCancelled, ImportFailed, clean_class_name, describe, detect_layout,
-    pick_new_colors, read_class_names, scan_dataset,
+    AMBIGUOUS, CLASS_NAME_RE, DUPLICATE, NO_IMAGE, UNREADABLE, ImportCancelled, ImportFailed,
+    clean_class_name, describe, find_yaml, pick_new_colors, read_class_names, scan_annotations,
 )
 from services.logger import get_logger
 
@@ -34,68 +36,53 @@ def _swatch(color_hex: str) -> QIcon:
     return QIcon(pm)
 
 
-def _short(path: Path, base: Path) -> str:
-    try:
-        rel = Path(path).relative_to(base)
-        return f"{rel}/" if str(rel) != "." else f"{Path(path).name}/"
-    except ValueError:
-        return str(path)
-
-
 class ImportAnnotationsDialog(QDialog):
-    """Pick a dataset, review what will be imported, then Import or Cancel."""
+    """Pick a folder of .txt annotations, review, then Import or Cancel."""
 
     COLUMNS = ("#", "Name in data.yaml", "Masks", "Project class", "Result")
 
-    def __init__(self, parent, folder, project_image_names, existing_classes):
+    def __init__(self, parent, folder, project_images, existing_classes, existing_masks=None):
         """
-        folder: the dataset folder chosen by the user.
-        project_image_names: file names of the images already in the project.
+        folder: the folder with the .txt files, chosen by the user.
+        project_images: paths of the images in the project.
         existing_classes: project class name -> colour (hex).
+        existing_masks: image name (stem) -> number of masks it already has.
         """
         super().__init__(parent)
-        self.setWindowTitle("Import Images with Annotations")
-        self._project_image_names = list(project_image_names)
+        self.setWindowTitle("Import Annotations")
+        self._project_images = list(project_images)
+        self._existing_masks = dict(existing_masks or {})
         self._existing = dict(existing_classes)
         self._existing_lower = {name.lower(): name for name in self._existing}
 
         self.scan_result = None
         self._class_names = None
-        self._folder = self._images_dir = self._labels_dir = self._yaml_path = None
+        self._folder = self._yaml_path = None
 
-        # --- dataset ---------------------------------------------------------
+        # --- folder and data.yaml -------------------------------------------
         self.folder_edit = QLineEdit(readOnly=True)
         folder_btn = QPushButton("Browse…")
         folder_btn.clicked.connect(self._choose_folder)
-        self.layout_label = QLabel()
-        self.layout_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        labels_btn = QPushButton("Labels folder…")
-        labels_btn.setToolTip("Use .txt files from another folder")
-        labels_btn.clicked.connect(self._choose_labels)
         self.yaml_edit = QLineEdit(readOnly=True)
         self.yaml_edit.setPlaceholderText("Choose the dataset's data.yaml (class names)")
         yaml_btn = QPushButton("Browse…")
         yaml_btn.clicked.connect(self._choose_yaml)
-        self.subfolders = QCheckBox("Include subfolders (e.g. train / val / test)")
-        self.subfolders.toggled.connect(lambda _: self._rescan())
         rescan_btn = QPushButton("Rescan")
         rescan_btn.clicked.connect(self._rescan)
 
         grid = QGridLayout()
-        grid.addWidget(QLabel("Dataset folder"), 0, 0)
+        grid.addWidget(QLabel("Annotations folder"), 0, 0)
         grid.addWidget(self.folder_edit, 0, 1)
         grid.addWidget(folder_btn, 0, 2)
-        grid.addWidget(QLabel("Files"), 1, 0)
-        grid.addWidget(self.layout_label, 1, 1)
-        grid.addWidget(labels_btn, 1, 2)
-        grid.addWidget(QLabel("Class names"), 2, 0)
-        grid.addWidget(self.yaml_edit, 2, 1)
-        grid.addWidget(yaml_btn, 2, 2)
-        options = QHBoxLayout()
-        options.addWidget(self.subfolders)
-        options.addStretch(1)
-        options.addWidget(rescan_btn)
-        grid.addLayout(options, 3, 1, 1, 2)
+        grid.addWidget(QLabel("Class names"), 1, 0)
+        grid.addWidget(self.yaml_edit, 1, 1)
+        grid.addWidget(yaml_btn, 1, 2)
+        note = QLabel("All .txt files in this folder and its subfolders are read; each belongs "
+                      "to the project image with exactly the same name.")
+        note.setWordWrap(True)
+        note.setStyleSheet("color: gray;")
+        grid.addWidget(note, 2, 1)
+        grid.addWidget(rescan_btn, 2, 2, Qt.AlignmentFlag.AlignTop)
         grid.setColumnStretch(1, 1)
 
         # --- summary, classes, details --------------------------------------
@@ -147,34 +134,24 @@ class ImportAnnotationsDialog(QDialog):
         layout.addWidget(self.classes_note)
         layout.addWidget(self.details, 3)
         layout.addLayout(buttons)
-        self.resize(860, 640)
+        self.resize(860, 600)
 
         self._set_folder(folder)
 
     # ------------------------------------------------------------- inputs
     def _set_folder(self, folder):
-        images_dir, labels_dir, yaml_path = detect_layout(folder)
         self._folder = Path(folder)
-        self._images_dir, self._labels_dir = images_dir, labels_dir
+        yaml_path = find_yaml(self._folder)
         if yaml_path is not None or self._yaml_path is None:
             self._yaml_path = yaml_path
         self.folder_edit.setText(str(self._folder))
-        self.subfolders.blockSignals(True)
-        self.subfolders.setChecked(images_dir != self._folder)  # images/ layout: may hold splits
-        self.subfolders.blockSignals(False)
         QTimer.singleShot(0, self._rescan)  # once the window is up
 
     def _choose_folder(self):
-        folder = QFileDialog.getExistingDirectory(self, "Dataset folder", str(self._folder or ""))
+        folder = QFileDialog.getExistingDirectory(self, "Folder with the .txt annotations",
+                                                  str(self._folder or ""))
         if folder:
             self._set_folder(folder)
-
-    def _choose_labels(self):
-        folder = QFileDialog.getExistingDirectory(self, "Folder with the .txt files",
-                                                  str(self._labels_dir or self._folder or ""))
-        if folder:
-            self._labels_dir = Path(folder)
-            self._rescan()
 
     def _choose_yaml(self):
         start = str(self._yaml_path.parent if self._yaml_path else self._folder or "")
@@ -191,8 +168,6 @@ class ImportAnnotationsDialog(QDialog):
         self.table.setRowCount(0)
         self.classes_note.clear()
         self.details.clear()
-        self.layout_label.setText(f"images: {_short(self._images_dir, self._folder)}   "
-                                  f".txt: {_short(self._labels_dir, self._folder)}")
         self.yaml_edit.setText(str(self._yaml_path) if self._yaml_path else "")
 
         if self._yaml_path is None:
@@ -204,7 +179,8 @@ class ImportAnnotationsDialog(QDialog):
             self._show_problem(str(exc))
             return
 
-        progress = QProgressDialog("Checking images and annotations…", "Cancel", 0, 0, self)
+        self.summary.setText("Checking the .txt files and reading the size of each matching image…")
+        progress = QProgressDialog("Checking annotations…", "Cancel", 0, 0, self)
         progress.setWindowModality(Qt.WindowModality.WindowModal)
         progress.setMinimumDuration(300)
 
@@ -215,14 +191,14 @@ class ImportAnnotationsDialog(QDialog):
             return not progress.wasCanceled()
 
         try:
-            scan = scan_dataset(self._images_dir, self._labels_dir, self._class_names,
-                                self._project_image_names, self.subfolders.isChecked(), report)
+            scan = scan_annotations(self._folder, self._class_names, self._project_images,
+                                    self._existing_masks, report)
         except ImportCancelled:
-            self._show_problem("Check cancelled. Press Rescan to check the dataset again.")
+            self._show_problem("Check cancelled. Press Rescan to check the folder again.")
             return
         except Exception as exc:
-            logger.exception("Scanning dataset %s failed", self._images_dir)
-            self._show_problem(f"The dataset could not be read: {exc}")
+            logger.exception("Scanning annotations in %s failed", self._folder)
+            self._show_problem(f"The folder could not be read: {exc}")
             return
         finally:
             progress.close()
@@ -231,53 +207,45 @@ class ImportAnnotationsDialog(QDialog):
         self._show_summary(scan)
         self._fill_class_table(scan)
         self.details.setPlainText(describe(scan) or "Nothing to report.")
-        exists = scan.with_status("exists")
-        if exists:
-            names = "\n".join(f"  • {e.path.name}" for e in exists[:15])
-            more = f"\n  … and {len(exists) - 15} more" if len(exists) > 15 else ""
-            QMessageBox.information(
-                self, "Already in the project",
-                f"{len(exists)} image(s) already exist in this project and will be skipped "
-                f"(their annotations are not imported):\n\n{names}{more}")
 
     def _show_problem(self, text):
         self.summary.setText(f"<span style='color:{_BAD}'>{text}</span>")
 
     def _show_summary(self, scan):
-        n_images = len(scan.entries)
-        if n_images == 0:
-            self._show_problem(f"No images found in {scan.images_dir}"
-                               + ("" if self.subfolders.isChecked() else
-                                  " (subfolders are not included)") + ".")
+        n_files = len(scan.entries)
+        if n_files == 0:
+            self._show_problem(f"No .txt files found in {scan.folder} or its subfolders.")
             return
-        readable = [e for e in scan.to_import if e.masks_ok]   # .txt read fine (may be empty)
-        with_masks = [e for e in readable if e.label.polygons]
-        lines = [f"<b>{n_images}</b> image(s) found."]
+        lines = [f"<b>{n_files}</b> .txt file(s) found."]
 
         def line(color, mark, text):
             lines.append(f"<span style='color:{color}'>{mark}</span> {text}")
 
-        line(_OK, "✔", f"<b>{len(scan.to_import)}</b> will be imported, "
-                       f"<b>{len(with_masks)}</b> of them with masks (<b>{scan.mask_count}</b> masks)")
-        if scan.without_label:
-            line(_WARN, "•", f"{len(scan.without_label)} have no .txt file: imported without masks")
+        if scan.mask_count:
+            line(_OK, "✔", f"<b>{scan.mask_count}</b> mask(s) will be added to "
+                           f"<b>{scan.images_with_masks}</b> project image(s)")
+        else:
+            line(_BAD, "✖", "nothing to import: no .txt file with polygons matches a project image")
+        existing = scan.with_existing_masks
+        if existing:
+            line(_WARN, "•", f"{len(existing)} of these images already have masks: the imported "
+                             f"masks are added next to them")
         if scan.broken_labels:
-            line(_WARN, "⚠", f"{len(scan.broken_labels)} .txt file(s) are broken: skipped, their "
-                             f"images imported without masks (see details)")
-        for status, text in (("exists", "already in the project: skipped"),
-                             ("duplicate", "have the same name as another image in this dataset: skipped"),
-                             ("unreadable", "can't be read as images: skipped")):
+            line(_WARN, "⚠", f"{len(scan.broken_labels)} .txt file(s) are broken: skipped (see details)")
+        for status, text in ((NO_IMAGE, "have no project image with the same name: skipped"),
+                             (DUPLICATE, "have the same name as another .txt in the folder: skipped"),
+                             (AMBIGUOUS, "match more than one project image (e.g. a.png and a.jpg): skipped"),
+                             (UNREADABLE, "belong to images that can't be read: skipped")):
             entries = scan.with_status(status)
             if entries:
-                line(_BAD, "✖", f"{len(entries)} {text}")
-        conf = sum(1 for e in readable if e.label.confidence_ignored)
+                line(_BAD if status != NO_IMAGE else _WARN, "✖" if status != NO_IMAGE else "•",
+                     f"{len(entries)} .txt file(s) {text}")
+        conf = sum(1 for e in scan.to_import if e.label.confidence_ignored)
         if conf:
             line(_WARN, "•", f"confidence values ignored in {conf} .txt file(s)")
-        dropped = sum(e.label.dropped_empty for e in readable)
+        dropped = sum(e.label.dropped_empty for e in scan.to_import)
         if dropped:
             line(_WARN, "•", f"{dropped} polygon(s) without area left out")
-        if scan.orphan_labels:
-            line(_WARN, "•", f"{len(scan.orphan_labels)} .txt file(s) have no image of the same name")
         self.summary.setText("<br>".join(lines))
 
     # ------------------------------------------------------------- classes
@@ -348,7 +316,7 @@ class ImportAnnotationsDialog(QDialog):
                 item.setForeground(self.palette().text().color())
                 item.setIcon(_swatch(colors[name.lower()]))
         scan = self.scan_result
-        self.import_btn.setEnabled(bool(scan and scan.to_import and valid))
+        self.import_btn.setEnabled(bool(scan and scan.mask_count and valid))
 
     # ------------------------------------------------------------- finish
     def _toggle_details(self, shown):
@@ -356,7 +324,7 @@ class ImportAnnotationsDialog(QDialog):
         self.details_btn.setText("Hide details" if shown else "Show details")
 
     def _confirm(self):
-        if self.scan_result is not None and self.scan_result.to_import:
+        if self.scan_result is not None and self.scan_result.mask_count:
             self.accept()
 
 

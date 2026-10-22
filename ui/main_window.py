@@ -36,9 +36,10 @@ logger = get_logger(__name__)
 
 from datetime import datetime
 from core.save_res import SaveResultsDBWorker
-from core.config import ProjectConfigManager
 from core.importers.yolo_importer import ImportCancelled, ImportFailed, describe, run_import
 from ui.dialogs.import_dialog import ImportAnnotationsDialog, ImportReportDialog
+from ui.dialogs.image_mode import ImageModeDialog
+from services import image_files
 from services.seproj import update_images as seproj_update_images
 from services.seproj import update_classes as seproj_update_classes
 
@@ -105,19 +106,30 @@ class MainApp(QMainWindow):
         )
         if not files:
             return
+        mode_dialog = ImageModeDialog(self, len(files))
+        if mode_dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        mode = mode_dialog.mode()
 
         # NOTE: assumes self.config is set in the services.recent_projects.initialize_project 
         # I know it should be cleaner, but quick workaround for now.
         images_dir = self.config.get_images_dir()
         os.makedirs(images_dir, exist_ok=True)
 
-        imported_count = 0
+        imported_count, placements, failed = 0, [], []
         for file in files:
             fname = os.path.basename(file)
             dest = os.path.join(images_dir, fname)
-            if not os.path.exists(dest):
-                shutil.copy(file, dest)
+            # lexists: a link whose original is gone still holds the name
+            # (and copying onto it would write to where it points).
+            if os.path.lexists(dest):
+                continue
+            try:
+                placements.append(image_files.place_image(file, dest, mode))
                 imported_count += 1
+            except OSError as exc:
+                logger.exception("Could not add %s to the project", file)
+                failed.append(f"{fname}: {exc.strerror or exc}")
 
         image_paths = loader(images_dir)
         self.state_manager.set_image_paths(image_paths)
@@ -129,59 +141,61 @@ class MainApp(QMainWindow):
         if project_root:
             seproj_update_images(project_root, [os.path.basename(p) for p in image_paths])
 
-        QMessageBox.information(
-            self, "Import Complete",
-            f"✅ Imported {imported_count} images into your project."
-        )
+        text = f"✅ Imported {imported_count} images into your project."
+        placed = image_files.summarize(placements)
+        if placed and mode == image_files.LINK:
+            text += "\n" + placed
+        if failed:
+            text += f"\n\n{len(failed)} could not be added:\n" + "\n".join(failed[:10])
+        QMessageBox.information(self, "Import Complete", text)
 
-    def import_images_with_annotations(self):
+    def import_annotations(self):
         """
-        File > Import Images with Annotations: images plus YOLO polygon .txt
-        files and the dataset's data.yaml (see core/importers/yolo_importer.py).
+        File > Import Annotations: YOLO polygon .txt files plus the dataset's
+        data.yaml, for images already in the project (each .txt goes to the
+        image with exactly the same name; see core/importers/yolo_importer.py).
         A review window shows what will happen first; the import itself is
-        all or nothing.
+        all or nothing. Images are not copied or changed.
         """
+        if not self.state_manager.image_paths:
+            QMessageBox.information(self, "Import Annotations",
+                                    "This project has no images yet. Add images first "
+                                    "(File > Import Images), then import their annotations.")
+            return
         project_root = Path(self.state_manager.project_root)
-        # An empty project never got these from initialize_project.
-        if getattr(self, "config", None) is None:
-            self.config = ProjectConfigManager(project_root)
         if getattr(self, "project_root", None) is None:
             self.project_root = str(project_root)
-        images_dir = Path(self.config.get_images_dir())
 
+        # (No folder argument: menu actions pass their "checked" flag as the
+        # first argument.)
         folder = QFileDialog.getExistingDirectory(
-            self, "Choose the dataset folder (images + .txt annotations)", str(Path.home()))
+            self, "Choose the folder with the .txt annotations", str(Path.home()))
         if not folder:
             return
-        if Path(folder).resolve() in (images_dir.resolve(), project_root.resolve()):
-            QMessageBox.information(
-                self, "Import Images with Annotations",
-                "That is this project's own folder. Choose the folder of the dataset "
-                "you want to bring in.")
-            return
 
-        project_images = [os.path.basename(p) for p in (loader(images_dir) or [])]
         existing_classes = {row[1]: row[2] for row in self.state_manager.class_manager.list_classes()}
-        dialog = ImportAnnotationsDialog(self, folder, project_images, existing_classes)
+        existing_masks = dict(self.state_manager.db.fetch_all(
+            "SELECT image_name, COUNT(*) FROM masks GROUP BY image_name"))
+        dialog = ImportAnnotationsDialog(self, folder, self.state_manager.image_paths,
+                                         existing_classes, existing_masks)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         scan, targets = dialog.scan_result, dialog.class_targets()
 
-        progress = QProgressDialog("Importing images…", "Cancel", 0, len(scan.to_import), self)
-        progress.setWindowTitle("Import Images with Annotations")
+        progress = QProgressDialog("Importing annotations…", "Cancel", 0, len(scan.to_import), self)
+        progress.setWindowTitle("Import Annotations")
         progress.setWindowModality(Qt.WindowModality.ApplicationModal)
-        progress.setMinimumDuration(0)
+        progress.setMinimumDuration(300)
 
         def report(done, total, name):
             progress.setValue(done)
             if name:
-                progress.setLabelText(f"Copying {name} ({done + 1}/{total})")
+                progress.setLabelText(f"Reading {name} ({done + 1}/{total})")
             QApplication.processEvents()
             return not progress.wasCanceled()
 
         try:
-            result = run_import(scan, targets, existing_classes, self.state_manager.db,
-                                images_dir, report)
+            result = run_import(scan, targets, existing_classes, self.state_manager.db, report)
         except ImportCancelled:
             QMessageBox.information(self, "Import cancelled", "Nothing was imported.")
             return
@@ -189,33 +203,25 @@ class MainApp(QMainWindow):
             QMessageBox.warning(self, "Import failed", f"{exc}\n\nNothing was imported.")
             return
         except Exception as exc:
-            logger.exception("Import from %s failed", folder)
+            logger.exception("Importing annotations from %s failed", folder)
             QMessageBox.critical(self, "Import failed", f"{exc}\n\nNothing was imported.")
             return
         finally:
             progress.close()
 
-        self._reload_after_import(images_dir)
+        self._refresh_after_annotation_import()
         text = describe(scan, result)
         logger.info("Import report for %s:\n%s", folder, text)
         ImportReportDialog(self, text, save_dir=self.project_root).exec()
 
-    def _reload_after_import(self, images_dir):
-        """Show the imported images and classes; keep the current image."""
-        current = self.state_manager.current_image_path
-        image_paths = loader(images_dir) or []
-        self.state_manager.set_image_paths(image_paths)
-        if current in image_paths:
-            self.state_manager.image_index = image_paths.index(current)
-        self.slider.set_image_count(len(image_paths))
-        if current is None and image_paths:  # the project had no images yet
-            self.image_display.display_image(self.state_manager.current_image_path)
-            QTimer.singleShot(0, self.image_display.fit_to_view)
-
-        seproj_update_images(self.project_root, [os.path.basename(p) for p in image_paths])
+    def _refresh_after_annotation_import(self):
+        """Show the new classes and masks (the current image included)."""
         rows = self.state_manager.class_manager.list_classes()
         seproj_update_classes(self.project_root, [{"name": r[1], "color": r[2]} for r in rows])
         self.sidebar.populate_class_dropdown()
+        current = self.state_manager.current_image_path
+        if current:
+            self.image_display.display_image(current, preserve_zoom=True)
         self.state_manager.masks_updated.emit()
 
     def next_image(self):
