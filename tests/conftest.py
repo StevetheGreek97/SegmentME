@@ -12,6 +12,15 @@ import os
 import sys
 from pathlib import Path
 
+# torch before anything loads PyQt6, as in main.py: PyQt6 carries an older
+# copy of the MSVC++ runtime, and if Qt loads it first, torch's c10.dll
+# fails to initialise on Windows ("WinError 1114").
+try:
+    import importlib
+    importlib.import_module("torch")
+except ImportError:
+    pass
+
 import numpy as np
 import pytest
 

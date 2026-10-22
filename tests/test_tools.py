@@ -315,3 +315,18 @@ def test_assigning_a_class_from_the_menu_redraws_the_image(win, qapp):
     after = d.cached_image_with_masks[60, 70]
     assert after[1] > before[1] and after[0] < before[0]   # red tint became green
     assert saved(win)[0][2] == "seed"
+
+
+def test_app_works_without_the_dextr_package(win, qapp, monkeypatch, no_popups):
+    """DEXTR is installed separately: without it, only the DEXTR tool is
+    unavailable (with a message), not the whole window."""
+    import sys
+    import core.managers.tool_manager as tm
+    for name in [m for m in sys.modules if m == "DEXTR" or m.startswith("DEXTR.")]:
+        monkeypatch.delitem(sys.modules, name)                       # loaded by earlier tests
+    monkeypatch.setitem(sys.modules, "DEXTR", None)                 # "not installed"
+    monkeypatch.delitem(sys.modules, "core.tools.dextr_mask", raising=False)
+    monkeypatch.setattr(tm, "ensure_model_available", lambda *a, **k: True)
+    assert win.tool_manager.enable_tool("dextr") is False
+    assert any("could not be started" in p[2] for p in no_popups)
+    assert win.tool_manager.enable_tool("manual_mask")              # other tools still work

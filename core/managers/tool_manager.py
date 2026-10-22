@@ -10,7 +10,6 @@ from ui.dialogs.model_manager_dialog import ensure_model_available
 from core.tools.sam2_masker import SamMasker2
 from core.tools.sam3_masker import Sam3Masker
 from core.tools.intelligent_scissors import IntelligentScissors
-from core.tools.dextr_mask import DEXTRMasker
 from services.logger import get_logger
 
 logger = get_logger(__name__)
@@ -62,6 +61,9 @@ class ToolManager:
                 else:
                     self.current_tool = SamMasker2(host, variant=variant)
             elif tool == "dextr":
+                # Imported here: the DEXTR package is installed separately
+                # (build.py); without it only this tool is unavailable.
+                from core.tools.dextr_mask import DEXTRMasker
                 self.current_tool = DEXTRMasker(host)
             elif tool == "intelligent_scissors":
                 self.current_tool = IntelligentScissors(host)   # edges made on the first click

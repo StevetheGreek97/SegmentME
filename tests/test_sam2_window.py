@@ -230,6 +230,7 @@ def test_e_while_running_runs_again_with_new_points(sam_window, qapp):
 def _slow_dextr(truth_value=8.0):
     import time
     import torch
+    pytest.importorskip("DEXTR", reason="the DEXTR package is installed separately (build.py)")
     from core.tools.dextr_mask import DEXTRMasker
 
     class FakeModel:

@@ -62,10 +62,13 @@ jobs:
         shell: bash
         run: |
           python -m pip install -r requirements.txt
-          # Same as install.sh: SAM2 from GitHub (needed by the image view and
+          # Same as build.py: SAM2 from GitHub (needed by the image view and
           # the SAM2 tool); HiReS without its numpy>=2 requirement.
           SAM2_BUILD_CUDA=0 python -m pip install "https://github.com/facebookresearch/sam2/archive/refs/heads/main.zip"
           python -m pip install --no-deps "hireseg==1.2.0"
+          # DEXTR (the DEXTR tool; the main window imports it): not on PyPI,
+          # installed from the DEXTR-SMe repo exactly as build.py does.
+          python -c "import sys, build; build.install_dextr([sys.executable, '-m', 'pip', 'install'])"
           python -m pip install pytest
 
       - name: Run tests
