@@ -12,13 +12,14 @@ from core.measure.scale import ProjectScale
 from core.state import StateManager
 from services.file_handlers import get_resource_path
 from services.logger import get_logger, log_memory_usage
+from ui.dialogs.class_colors_dialog import ClassColorsDialog
 from ui.dialogs.instance_count import MaskStatisticsDock
 from ui.dialogs.results_dialog import SaveResultsDialog, run_results_export
 from ui.dialogs.scale_dialog import ScaleDialog
 from ui.dialogs.table import MaskResultsDock
 from ui.elements.image_display.image_display import ImageDisplay
 from ui.elements.menubar import MenuBar
-from ui.elements.sidebar import Sidebar
+from ui.elements.sidebar import NO_TOOL_KEY, TOOL_KEYS, Sidebar
 from ui.elements.slider import ImageSlider
 from ui.flows import data_io
 from ui.flows.runs import InferenceRun, TrainingRun
@@ -90,6 +91,9 @@ class MainApp(QMainWindow):
     def import_images(self):
         data_io.import_images(self)
 
+    def import_image_folder(self):
+        data_io.import_image_folder(self)
+
     def import_annotations(self):
         data_io.import_annotations(self)
 
@@ -129,6 +133,17 @@ class MainApp(QMainWindow):
                          len(self.state_manager.image_paths))
         else:
             logger.debug("Already at the first image")
+
+    # ---------- Classes ----------
+    def edit_class_colors(self):
+        """Actions > Class Colours…"""
+        ClassColorsDialog(self).exec()
+
+    def change_class_color(self, class_name, color):
+        """New colour for a class: the database (everything that shows class
+        colours follows classes_changed) and the project file."""
+        self.state_manager.class_manager.set_class_color(class_name, color)
+        self.sidebar._sync_classes_to_seproj()
 
     # ---------- Inference / training (see ui/flows/runs.py) ----------
     def popup_inference_dialog(self, display_text):
@@ -208,6 +223,22 @@ class MainApp(QMainWindow):
             return False
         return True
 
+    # Tool keys (as in Inkscape): P manual, I scissors, A SAM, D DEXTR, Q none
+    _TOOL_BY_KEY = {getattr(Qt.Key, f"Key_{k}"): name for name, k in TOOL_KEYS.items()}
+    _TOOL_BY_KEY[getattr(Qt.Key, f"Key_{NO_TOOL_KEY}")] = None
+
+    def _tool_key(self, event) -> bool:
+        """Plain P / I / A / D / Q switch the tool (Ctrl+letter etc. stay free).
+        Not while a split / brush edit is open: those use the keyboard."""
+        if event.key() not in self._TOOL_BY_KEY:
+            return False
+        if event.modifiers() & ~Qt.KeyboardModifier.KeypadModifier:
+            return False
+        if self.image_display._edit_mode is not None:
+            return False
+        self.sidebar.select_tool(self._TOOL_BY_KEY[event.key()])
+        return True
+
     def eventFilter(self, source, event):
         if event.type() in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease) and not self._shortcut_target(source):
             if event.type() == QEvent.Type.KeyRelease and event.key() == Qt.Key.Key_H:
@@ -226,6 +257,8 @@ class MainApp(QMainWindow):
                 return True
             elif event.key() == Qt.Key.Key_H:
                 self.image_display.set_peeking(True)
+                return True
+            elif self._tool_key(event):
                 return True
         elif event.type() == QEvent.Type.KeyRelease and not event.isAutoRepeat():
             if event.key() == Qt.Key.Key_H:

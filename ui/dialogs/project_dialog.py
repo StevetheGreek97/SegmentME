@@ -1,7 +1,7 @@
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QListWidget,
     QListWidgetItem, QFileDialog, QMessageBox, QLineEdit, QProgressBar,
-    QAbstractItemView, QStyle, QCheckBox
+    QAbstractItemView, QStyle, QApplication
 )
 from PyQt6.QtCore import Qt, QSize
 from PyQt6.QtGui import QColor, QPalette
@@ -13,6 +13,7 @@ from services.logger import get_logger
 
 logger = get_logger(__name__)
 from services import image_files
+from services.file_handlers import find_images, is_image_file
 import shutil, os, re, pathlib, platform, json
 from datetime import datetime
 
@@ -111,12 +112,14 @@ def _build_stylesheet(widget) -> str:
 # ---------- Optional: drag-and-drop image list for the create dialog ----------
 
 class DraggableImageList(QListWidget):
-    def __init__(self, accepted_extensions=None, *args, **kwargs):
+    """The images for a new project. Images or folders can be dropped on it;
+    a folder adds every image in it and its subfolders."""
+    def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.setAcceptDrops(True)
-        self.accepted_extensions = accepted_extensions or [".png", ".jpg", ".jpeg", ".bmp", ".tif"]
         self.file_list = []
         self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.on_skipped = None   # called with the file names left out as duplicates
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
@@ -126,10 +129,31 @@ class DraggableImageList(QListWidget):
         event.accept()
 
     def dropEvent(self, event):
-        for url in event.mimeData().urls():
-            path = pathlib.Path(url.toLocalFile()).resolve()
-            if path.is_file() and path.suffix.lower() in self.accepted_extensions:
-                self.add_file(path)
+        paths = [pathlib.Path(url.toLocalFile()) for url in event.mimeData().urls()]
+        self.add_paths(paths)
+
+    def add_paths(self, paths):
+        """Add image files, and every image inside folders (with subfolders).
+        Returns (number added, names skipped because an image with that name
+        is already listed)."""
+        files = []
+        for path in paths:
+            path = pathlib.Path(path)
+            if path.is_dir():
+                files.extend(find_images(path))
+            elif path.is_file() and is_image_file(path):
+                files.append(str(path))
+        added, skipped = 0, []
+        for f in files:
+            if self.add_file(f):
+                added += 1
+            else:
+                skipped.append(pathlib.Path(f).name)
+        if skipped and self.on_skipped is not None:
+            self.on_skipped(skipped)
+        logger.debug("Added %d image(s) to the new project list; %d duplicate name(s) skipped",
+                     added, len(skipped))
+        return added, skipped
 
     def add_file(self, path) -> bool:
         """Add one image; False if an image with that file name is already
@@ -173,23 +197,26 @@ class CreateProjectDialog(QDialog):
         v.addWidget(QLabel("Import Images (optional)"))
         row2 = QHBoxLayout()
         import_btn = QPushButton(self.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogContentsView), " Add Images…")
+        folder_btn = QPushButton(self.style().standardIcon(QStyle.StandardPixmap.SP_DirOpenIcon), " Add Folder…")
+        folder_btn.setToolTip("Add every image in a folder, including its subfolders")
         row2.addWidget(import_btn)
+        row2.addWidget(folder_btn)
         row2.addStretch(1)
         v.addLayout(row2)
 
         self.img_list = DraggableImageList()
         self.img_list.setMinimumHeight(120)
+        self.img_list.on_skipped = self._show_skipped
         v.addWidget(self.img_list)
+
+        # Images left out because their name is already listed
+        self.skipped_note = QLabel()
+        self.skipped_note.setWordWrap(True)
+        self.skipped_note.hide()
+        v.addWidget(self.skipped_note)
 
         self.image_mode = ImageModeChoice(self)
         v.addWidget(self.image_mode)
-
-        self.annotations_check = QCheckBox(
-            "Also import annotations for these images (.txt files + data.yaml)")
-        self.annotations_check.setToolTip(
-            "After the project is created, choose the folder with the YOLO .txt files; "
-            "each goes to the image with exactly the same name.")
-        v.addWidget(self.annotations_check)
 
         self.progress = QProgressBar()
         self.progress.setValue(0)
@@ -205,10 +232,10 @@ class CreateProjectDialog(QDialog):
 
         # Wire
         import_btn.clicked.connect(self._import_images)
+        folder_btn.clicked.connect(self._import_folder)
         create_btn.clicked.connect(self._finalize)
 
         self.selected_project_db = None  # will be set on success
-        self.import_annotations = False  # open Import Annotations once the project is open
 
     def _default_desktop_path(self):
         system_platform = platform.system()
@@ -229,10 +256,29 @@ class CreateProjectDialog(QDialog):
             self._default_desktop_path(),
             "Images (*.png *.jpg *.jpeg *.bmp *.tif)"
         )
-        for f in files:
-            p = pathlib.Path(f).resolve()
-            if p.is_file() and p.suffix.lower() in self.img_list.accepted_extensions:
-                self.img_list.add_file(p)
+        self.img_list.add_paths(files)
+
+    def _import_folder(self):
+        folder = QFileDialog.getExistingDirectory(
+            self, "Select a Folder of Images (subfolders included)", self._default_desktop_path())
+        if not folder:
+            return
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)   # a cloud folder lists slowly
+        try:
+            added, _skipped = self.img_list.add_paths([folder])
+        finally:
+            QApplication.restoreOverrideCursor()
+        if not added and not _skipped:
+            QMessageBox.information(self, "No Images", f"No images found in\n{folder}\nor its subfolders.")
+
+    def _show_skipped(self, names):
+        """Images have to have different names: they share one images folder
+        and masks are stored by image name."""
+        shown = ", ".join(names[:5]) + (f" and {len(names) - 5} more" if len(names) > 5 else "")
+        self.skipped_note.setText(
+            f"{len(names)} image(s) not added: an image with the same name is already in the "
+            f"list ({shown}). Images in a project need different names.")
+        self.skipped_note.show()
 
     def _finalize(self):
         base_dir = pathlib.Path(self.path_input.text()).expanduser().resolve()
@@ -284,10 +330,8 @@ class CreateProjectDialog(QDialog):
                 json.dump(seproj_data, fh, indent=2)
 
             self.selected_project_db = str(project_path / ".segmentme" / "masks.db")
-            self.import_annotations = self.annotations_check.isChecked()
-            logger.info("Created project %s (%s)%s", project_path,
-                        image_files.summarize(placements) or "no images",
-                        "; annotations to import next" if self.import_annotations else "")
+            logger.info("Created project %s (%s)", project_path,
+                        image_files.summarize(placements) or "no images")
             fallback = [how for how, reason in placements if how == image_files.COPIED and reason]
             if mode == image_files.LINK and fallback:
                 QMessageBox.information(self, "Some images were copied",
@@ -312,7 +356,6 @@ class ProjectStartupDialog(QDialog):
 
         self.selected_project_path = None
         self.is_new_project = None
-        self.import_annotations = False  # New Project asked to import annotations
 
         self.setStyleSheet(_build_stylesheet(self))
 
@@ -421,5 +464,4 @@ class ProjectStartupDialog(QDialog):
         if dlg.exec() == QDialog.DialogCode.Accepted:
             self.selected_project_path = dlg.selected_project_db
             self.is_new_project = True
-            self.import_annotations = dlg.import_annotations
             self.accept()

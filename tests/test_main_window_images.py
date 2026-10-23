@@ -1022,3 +1022,32 @@ def test_array_item_shares_memory_and_repaints_in_place(qapp):
     item.changed([(20, 10, 21, 11)])
     item.set_array(None)
     assert item.isNull()
+
+
+# --------------------------------------------------------------------------
+# File > Import Image Folder: a folder with its subfolders
+# --------------------------------------------------------------------------
+def test_import_image_folder_includes_subfolders(window, tmp_path, monkeypatch, no_popups):
+    from PyQt6.QtWidgets import QDialog, QFileDialog
+    import ui.flows.data_io as flows
+    src = tmp_path / "scans"
+    for rel in ("week 1/a.png", "week 2/deep/b.jpg", "week 2/a.png", "c.tif"):
+        make_image(src / rel)
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", staticmethod(lambda *a, **k: str(src)))
+
+    class Choose(flows.ImageModeDialog):
+        def exec(self):
+            self.choice.set_mode(image_files.COPY)
+            return QDialog.DialogCode.Accepted
+    monkeypatch.setattr(flows, "ImageModeDialog", Choose)
+    window.import_image_folder()
+    images = tmp_path / "proj" / "images"
+    assert sorted(os.listdir(images)) == ["a.png", "b.jpg", "c.tif", "first.png"]
+    assert len(window.state_manager.image_paths) == 4
+    report = no_popups[-1][2]
+    assert "Imported 3 images" in report and "a.png: another image with this name" in report
+
+
+def test_menu_has_import_image_folder(window):
+    texts = [a.text() for a in window.menuBar().actions()[0].menu().actions()]
+    assert "Import Image Folder…" in texts

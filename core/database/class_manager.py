@@ -48,6 +48,15 @@ class ClassDatabaseManager:
         result = self.db.fetch_one("SELECT id FROM classes WHERE class_name = ?", (class_name,))
         return result[0] if result else None
 
+    def set_class_color(self, class_name, color):
+        """Give a class a new colour (QColor or "#rrggbb"). Everything that
+        shows class colours follows classes_changed."""
+        hex_color = QColor(color).name()
+        self.db.execute_query("UPDATE classes SET color = ? WHERE class_name = ?",
+                              (hex_color, class_name))
+        logger.info("Class %r is now %s", class_name, hex_color)
+        self.parent.classes_changed.emit()
+
     def get_class_color(self, class_name):
         """
         Get the color of a class.

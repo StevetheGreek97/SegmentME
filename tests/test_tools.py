@@ -330,3 +330,215 @@ def test_app_works_without_the_dextr_package(win, qapp, monkeypatch, no_popups):
     assert win.tool_manager.enable_tool("dextr") is False
     assert any("could not be started" in p[2] for p in no_popups)
     assert win.tool_manager.enable_tool("manual_mask")              # other tools still work
+
+
+# ------------------------------------------------------------------ mouse wheel (as in Inkscape)
+def _wheel(view, dy=0, dx=0, mods=None, pixel=(0, 0)):
+    from PyQt6.QtCore import QPoint, QPointF, Qt
+    from PyQt6.QtGui import QWheelEvent
+    pos = QPointF(view.viewport().width() / 2, view.viewport().height() / 2)
+    event = QWheelEvent(pos, view.viewport().mapToGlobal(pos), QPoint(*pixel), QPoint(dx, dy),
+                        Qt.MouseButton.NoButton, mods or Qt.KeyboardModifier.NoModifier,
+                        Qt.ScrollPhase.NoScrollPhase, False)
+    view.wheelEvent(event)
+
+
+def _zoomed_in(win, qapp):
+    d = win.image_display
+    for _ in range(12):
+        _wheel(d, dy=120)                                  # plain wheel zooms
+    qapp.processEvents()
+    assert d._zoom_factor > 2
+    d.horizontalScrollBar().setValue(d.horizontalScrollBar().maximum() // 2)
+    d.verticalScrollBar().setValue(d.verticalScrollBar().maximum() // 2)
+    return d
+
+
+def _pos(d):
+    return d.horizontalScrollBar().value(), d.verticalScrollBar().value(), round(d._zoom_factor, 6)
+
+
+def test_ctrl_wheel_moves_up_and_down(win, qapp):
+    from PyQt6.QtCore import Qt
+    d = _zoomed_in(win, qapp)
+    x, y, zoom = _pos(d)
+    _wheel(d, dy=-120, mods=Qt.KeyboardModifier.ControlModifier)        # wheel down: image moves up
+    assert _pos(d) == (x, y + d.PAN_PX_PER_NOTCH, zoom)
+    _wheel(d, dy=120, mods=Qt.KeyboardModifier.ControlModifier)
+    assert _pos(d) == (x, y, zoom)
+
+
+def test_shift_wheel_moves_left_and_right(win, qapp):
+    from PyQt6.QtCore import Qt
+    d = _zoomed_in(win, qapp)
+    x, y, zoom = _pos(d)
+    _wheel(d, dy=-120, mods=Qt.KeyboardModifier.ShiftModifier)
+    assert _pos(d) == (x + d.PAN_PX_PER_NOTCH, y, zoom)
+    # macOS (and some Linux setups) already turn Shift+wheel into a sideways scroll
+    _wheel(d, dx=120, mods=Qt.KeyboardModifier.ShiftModifier)
+    assert _pos(d) == (x, y, zoom)
+
+
+def test_sideways_touchpad_swipe_moves_left_and_right(win, qapp):
+    d = _zoomed_in(win, qapp)
+    x, y, zoom = _pos(d)
+    _wheel(d, dx=-120, pixel=(-25, 0))
+    assert _pos(d) == (x + 25, y, zoom)
+
+
+def test_plain_wheel_still_zooms(win, qapp):
+    d = win.image_display
+    before = d._zoom_factor
+    _wheel(d, dy=120)
+    assert d._zoom_factor > before
+
+
+def test_brush_editor_resizes_with_brackets_and_alt_wheel(win, qapp):
+    from PyQt6.QtCore import Qt
+    add_class(win)
+    win.state_manager.mask_manager.save_mask(
+        np.array([[50, 40], [90, 40], [90, 80], [50, 80]], np.float32), "a", "leaf")
+    qapp.processEvents()
+    d = win.image_display
+    d.start_brush_mode(next(iter(d._mask_index)))
+    mode = d._edit_mode
+    r = mode.radius
+    key(win, Qt.Key.Key_BracketRight)
+    assert mode.radius == r + 2
+    key(win, Qt.Key.Key_BracketLeft)
+    key(win, Qt.Key.Key_BracketLeft)
+    assert mode.radius == r - 2
+    _wheel(d, dy=120, mods=Qt.KeyboardModifier.AltModifier)
+    assert mode.radius == r
+    _wheel(d, dx=120, mods=Qt.KeyboardModifier.AltModifier)       # Alt turned into sideways
+    assert mode.radius == r + 2
+    zoom = d._zoom_factor
+    _wheel(d, dy=120)                                              # plain wheel: zoom, not size
+    assert d._zoom_factor > zoom and mode.radius == r + 2
+    x, y, z = _pos(d)
+    _wheel(d, dy=-120, mods=Qt.KeyboardModifier.ControlModifier)   # Ctrl: move, not zoom
+    assert _pos(d)[2] == z and mode.radius == r + 2
+    d.cancel_edit_mode()
+
+
+# ------------------------------------------------------------------ tool keys (P I A D Q)
+def test_tool_keys_switch_tools_like_the_buttons(win, qapp, monkeypatch):
+    from PyQt6.QtCore import Qt
+    from core.tools.manual_mask import ManualMask
+    from core.tools.intelligent_scissors import IntelligentScissors
+    sb = win.sidebar
+    key(win, Qt.Key.Key_P)
+    assert isinstance(win.tool_manager.current_tool, ManualMask) and sb.manual_mask.isChecked()
+    key(win, Qt.Key.Key_P)                                   # again: stays on
+    assert isinstance(win.tool_manager.current_tool, ManualMask) and sb.manual_mask.isChecked()
+    key(win, Qt.Key.Key_I)
+    assert isinstance(win.tool_manager.current_tool, IntelligentScissors)
+    assert sb.intelligent_scissors.isChecked() and not sb.manual_mask.isChecked()
+    key(win, Qt.Key.Key_Q)                                   # no tool
+    assert win.tool_manager.current_tool is None
+    assert not any(b.isChecked() for b in sb._tool_buttons.values())
+
+
+def test_model_tool_keys_go_through_the_same_checks(win, qapp, monkeypatch):
+    """A and D do what clicking SAM / DEXTR does: a model that isn't
+    installed (and isn't downloaded) leaves the button off."""
+    from PyQt6.QtCore import Qt
+    import core.managers.tool_manager as tm
+    asked = []
+    monkeypatch.setattr(tm, "ensure_model_available", lambda parent, spec: asked.append(spec.label) or False)
+    for k, button in ((Qt.Key.Key_A, win.sidebar.sam), (Qt.Key.Key_D, win.sidebar.dextr)):
+        key(win, k)
+        assert not button.isChecked() and win.tool_manager.current_tool is None
+    assert len(asked) == 2
+
+
+def test_tool_keys_are_ignored_while_typing_or_with_ctrl(win, qapp):
+    from PyQt6.QtCore import Qt
+    from PyQt6.QtTest import QTest
+    line = win.slider.image_picker.lineEdit()
+    line.setFocus()
+    line.clear()
+    QTest.keyClicks(line, "padiq")                             # typing in the search box
+    assert line.text() == "padiq" and win.tool_manager.current_tool is None
+    QTest.keyClick(win.image_display, Qt.Key.Key_P, Qt.KeyboardModifier.ControlModifier)
+    assert win.tool_manager.current_tool is None              # Ctrl+P: not a tool key
+
+
+def test_tool_buttons_show_their_keys(win):
+    sb = win.sidebar
+    for btn, k in ((sb.manual_mask, "P"), (sb.intelligent_scissors, "I"), (sb.sam, "A"), (sb.dextr, "D")):
+        assert f"Shortcut: {k}" in btn.toolTip()
+
+
+# ------------------------------------------------------------------ Actions > Class Colours…
+def _pick(monkeypatch, hex_color):
+    """The colour picker chooses `hex_color` (as a click on it would)."""
+    from PyQt6.QtWidgets import QDialog
+    from ui.dialogs import class_colors_dialog as ccd
+
+    def exec_(self):
+        self._choose(hex_color)
+        return QDialog.DialogCode.Accepted
+    monkeypatch.setattr(ccd.ColorPicker, "exec", exec_)
+
+
+def test_change_class_colour_updates_everything(win, qapp, monkeypatch):
+    import json
+    from ui.dialogs.class_colors_dialog import ClassColorsDialog
+    add_class(win, "leaf", "#ff0000")
+    add_class(win, "seed", "#00ff00")
+    win.state_manager.mask_manager.save_mask(
+        np.array([[50, 40], [90, 40], [90, 80], [50, 80]], np.float32), "a", "leaf")
+    qapp.processEvents()
+    d = win.image_display
+    before = d.cached_image_with_masks[60, 70].copy()
+    dialog = ClassColorsDialog(win)
+    assert set(dialog.swatches) == {"leaf", "seed"}
+    _pick(monkeypatch, "#4363d8")                           # blue from the palette
+    dialog.change("leaf")
+    qapp.processEvents()
+    assert win.state_manager.class_manager.get_class_color("leaf").name() == "#4363d8"
+    after = d.cached_image_with_masks[60, 70]
+    assert after[2] > before[2] and after[0] < before[0]   # red tint became blue on the image
+    seproj = json.loads(next((win.state_manager.project_root).glob("*.SEproj")).read_text())
+    assert {c["name"]: c["color"] for c in seproj["classes"]}["leaf"] == "#4363d8"
+    assert "4363d8" in dialog.swatches["leaf"].styleSheet()  # the window shows the new colour
+
+
+def test_similar_colour_asks_first(win, qapp, monkeypatch):
+    from PyQt6.QtWidgets import QMessageBox
+    from ui.dialogs.class_colors_dialog import ClassColorsDialog
+    add_class(win, "leaf", "#ff0000")
+    add_class(win, "seed", "#00ff00")
+    dialog = ClassColorsDialog(win)
+    asked = []
+    for answer, expected in ((QMessageBox.StandardButton.No, "#ff0000"),
+                             (QMessageBox.StandardButton.Yes, "#00e000")):
+        monkeypatch.setattr(QMessageBox, "question",
+                            staticmethod(lambda *a, answer=answer, **k: asked.append(a[2]) or answer))
+        _pick(monkeypatch, "#00e000")                       # looks like seed's green
+        dialog.change("leaf")
+        assert win.state_manager.class_manager.get_class_color("leaf").name() == expected
+    assert len(asked) == 2 and "'seed'" in asked[0]
+
+
+def test_class_colours_window_from_the_actions_menu(win, qapp, monkeypatch):
+    from ui.dialogs import class_colors_dialog as ccd
+    opened = []
+    monkeypatch.setattr(ccd.ClassColorsDialog, "exec", lambda self: opened.append(self) or 1)
+    actions = {a.text(): a for a in win.menuBar().actions()[1].menu().actions()}
+    actions["Class Colours…"].trigger()
+    assert opened and opened[0].swatches == {}              # no classes yet: says so
+
+
+def test_colour_distance():
+    import itertools
+    from services import colors
+    assert colors.color_distance("#ff0000", "#ff0000") == 0
+    assert colors.color_distance("#00ff00", "#00e000") < colors.SIMILAR_DELTA_E   # look alike
+    assert colors.color_distance("#ff0000", "#0000ff") > 100
+    # every palette colour is clearly different from every other one
+    assert all(colors.color_distance(a, b) >= colors.SIMILAR_DELTA_E
+               for a, b in itertools.combinations(colors.PALETTE, 2))
+    assert colors.closest("#fe0101", {"a": "#00ff00", "b": "#ff0000"})[0] == "b"
+    assert colors.closest("#ff0000", {}) == (None, float("inf"))

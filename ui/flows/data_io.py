@@ -6,13 +6,14 @@ window; the window's menu methods call them.
 import os
 from pathlib import Path
 
-from PyQt6.QtWidgets import QDialog, QFileDialog, QMessageBox
+from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import QApplication, QDialog, QFileDialog, QMessageBox
 
 from core.exporters.coco_exporter import COCOExporter
 from core.exporters.yolo_exporter import YOLOExporter
 from core.importers.yolo_importer import ImportCancelled, ImportFailed, describe, run_import
 from services import image_files
-from services.file_handlers import loader
+from services.file_handlers import find_images, loader
 from services.logger import get_logger
 from services.seproj import update_classes as seproj_update_classes
 from services.seproj import update_images as seproj_update_images
@@ -26,12 +27,51 @@ logger = get_logger(__name__)
 
 
 def import_images(window):
+    """File > Import Images: chosen image files."""
     files, _ = QFileDialog.getOpenFileNames(
         window, "Select Images to Import",
-        filter="Images (*.png *.jpg *.jpeg *.bmp *.tif)"
+        filter="Images (*.png *.jpg *.jpeg *.bmp *.tif *.tiff)"
     )
-    if not files:
+    if files:
+        add_images(window, files)
+
+
+def import_image_folder(window):
+    """File > Import Image Folder: every image in a folder and its subfolders."""
+    folder = QFileDialog.getExistingDirectory(window, "Select a Folder of Images (subfolders included)")
+    if not folder:
         return
+    QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)   # a cloud folder lists slowly
+    try:
+        files = find_images(folder)
+    finally:
+        QApplication.restoreOverrideCursor()
+    if not files:
+        QMessageBox.information(window, "Import Image Folder",
+                                f"No images found in\n{folder}\nor its subfolders.")
+        return
+    logger.info("Import Image Folder: %d image(s) in %s and its subfolders", len(files), folder)
+    add_images(window, files)
+
+
+def _unique_names(files):
+    """Keep the first image of each file name (case-insensitive): a project's
+    images share one folder and masks are stored by image name.
+    Returns (kept, names left out)."""
+    seen, kept, dropped = set(), [], []
+    for f in files:
+        key = os.path.basename(f).lower()
+        if key in seen:
+            dropped.append(os.path.basename(f))
+        else:
+            seen.add(key)
+            kept.append(f)
+    return kept, dropped
+
+
+def add_images(window, files):
+    """Copy or link `files` into the open project (asks which)."""
+    files, same_name = _unique_names(files)
     mode_dialog = ImageModeDialog(window, len(files))
     if mode_dialog.exec() != QDialog.DialogCode.Accepted:
         return
@@ -59,6 +99,7 @@ def import_images(window):
     result = run.result
     imported_count, placements = len(result.placed), result.placements
     failed = [f"{name}: {why}" for name, why in result.failed]
+    failed += [f"{name}: another image with this name was chosen too" for name in same_name]
 
     image_paths = loader(images_dir)
     window.state_manager.set_image_paths(image_paths)

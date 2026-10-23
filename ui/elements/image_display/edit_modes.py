@@ -230,8 +230,9 @@ class BrushEditMode(MaskEditMode):
     """
     Paint / erase one mask with a circular brush.
 
-    Left-drag paints, right-drag erases, scroll resizes the brush,
-    Ctrl+scroll zooms, S applies, Esc cancels.
+    Left-drag paints, right-drag erases, [ and ] (or Alt+scroll) resize
+    the brush, S applies, Esc cancels. The rest of the wheel works as on
+    the image: scroll zooms, Ctrl+scroll moves up / down, Shift+scroll left / right.
     """
 
     cursor = Qt.CursorShape.BlankCursor  # the circle item replaces the cursor
@@ -276,7 +277,7 @@ class BrushEditMode(MaskEditMode):
 
         self._refresh_overlay()
         logger.info("Brush mode armed for mask %s (left-drag paints, right-drag erases, "
-                    "scroll resizes, Ctrl+scroll zooms, S applies, Esc cancels)", self.mask_id)
+                    "[ / ] or Alt+scroll resize, S applies, Esc cancels)", self.mask_id)
         return True
 
     def stop(self):
@@ -317,18 +318,28 @@ class BrushEditMode(MaskEditMode):
         return False
 
     def wheel(self, event):
-        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
-            return False  # Ctrl+scroll falls through to the view's zoom
-        step = 2 if event.angleDelta().y() > 0 else -2
+        """Alt+scroll resizes the brush; any other scroll is the view's
+        (zoom / move). Some systems turn Alt+scroll into a sideways scroll."""
+        if not event.modifiers() & Qt.KeyboardModifier.AltModifier:
+            return False
+        delta = event.angleDelta()
+        amount = delta.y() or delta.x()
+        if amount:
+            self.resize_brush(2 if amount > 0 else -2)
+        return True
+
+    def resize_brush(self, step):
         self.radius = max(3, min(200, self.radius + step))
         BrushEditMode._last_radius = self.radius
         if self.display.x is not None:
             self._move_cursor((self.display.x, self.display.y))
-        return True
 
     def key_press(self, event):
         if event.key() == Qt.Key.Key_S:
             self._commit()
+            return True
+        if event.key() in (Qt.Key.Key_BracketLeft, Qt.Key.Key_BracketRight):
+            self.resize_brush(2 if event.key() == Qt.Key.Key_BracketRight else -2)
             return True
         super().key_press(event)  # Esc cancels
         return True  # swallow remaining keys while editing

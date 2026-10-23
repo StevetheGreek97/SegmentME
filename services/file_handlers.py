@@ -15,17 +15,34 @@ def natural_key(name):
             for part in re.split(r"(\d+)", os.path.basename(name))]
 
 
+IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif")
+
+
+def is_image_file(path) -> bool:
+    return str(path).lower().endswith(IMAGE_EXTENSIONS)   # IMG_01.JPG, scan.TIF too
+
+
+def find_images(folder):
+    """Every image in `folder` and all its subfolders, in natural name order
+    (by file name, then folder). Hidden folders (".segmentme", ".Trash", ...)
+    are skipped; folder links are not followed (no loops)."""
+    found = []
+    for root, dirs, files in os.walk(folder):
+        dirs[:] = [d for d in dirs if not d.startswith(".")]
+        found.extend(os.path.join(root, f) for f in files if is_image_file(f))
+    return sorted(found, key=lambda p: (natural_key(p), natural_key(os.path.dirname(p))))
+
+
 def loader(folder_path):
     """The images in a folder, sorted by name (natural order). os.listdir's
     order depends on the file system -- it differs between Linux, Windows and
     two copies of the same folder -- so the slider, Next / Previous and the
     first image shown would otherwise too."""
-    valid_extensions = (".png", ".jpg", ".jpeg", ".bmp", ".tiff", '.tif')
     if folder_path:
         image_paths = []
         for f in os.listdir(folder_path):
             joined = os.path.join(folder_path, f)
-            if joined.lower().endswith(valid_extensions):  # IMG_01.JPG, scan.TIF too
+            if is_image_file(joined):
                 image_paths.append(joined)
         return sorted(image_paths, key=natural_key)
     else:

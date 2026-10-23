@@ -91,8 +91,8 @@ class MaskContextMenu(QMenu):
 
     def _build_brush_section(self, parent_menu):
         brush = parent_menu.addAction(qta.icon("fa5s.paint-brush"), "Brush edit (paint / erase)")
-        brush.setToolTip("Left-drag paints, right-drag erases, scroll resizes, "
-                         "Ctrl+scroll zooms, S applies, Esc cancels")
+        brush.setToolTip("Left-drag paints, right-drag erases, [ / ] or Alt+scroll resize "
+                         "the brush, S applies, Esc cancels")
         brush.triggered.connect(self._start_brush)
         if len(self.rows) != 1:  # only meaningful for a single mask
             brush.setEnabled(False)

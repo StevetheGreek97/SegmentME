@@ -12,6 +12,11 @@ from services.logger import get_logger
 
 logger = get_logger(__name__)
 
+# Keyboard shortcuts for the tools (handled in MainApp.eventFilter)
+TOOL_KEYS = {"manual_mask": "P", "intelligent_scissors": "I", "sam": "A", "dextr": "D"}
+NO_TOOL_KEY = "Q"
+
+
 class Sidebar(QWidget):
     """
     Polished Sidebar: grouped sections, elegant buttons, subtle separators,
@@ -169,6 +174,17 @@ class Sidebar(QWidget):
         layout.addLayout(row1)
         layout.addLayout(row2)
 
+        # Keyboard: the same as clicking the button (see select_tool)
+        self._tool_buttons = {
+            "manual_mask": self.manual_mask,
+            "intelligent_scissors": self.intelligent_scissors,
+            "sam": self.sam,
+            "dextr": self.dextr,
+        }
+        for name, btn in self._tool_buttons.items():
+            if name != "sam":                  # SAM's tooltip is set in update_sam_tooltip
+                btn.setToolTip(f"{btn.toolTip()}\nShortcut: {TOOL_KEYS[name]}")
+
     # ----------------------------------------------------------------------
     # Classes
     # ----------------------------------------------------------------------
@@ -199,6 +215,23 @@ class Sidebar(QWidget):
     # ----------------------------------------------------------------------
     # Toggle handlers (keep your tool-manager logic, but make toggles exclusive visually)
     # ----------------------------------------------------------------------
+    def select_tool(self, name):
+        """Switch to a tool as if its button were clicked (keyboard shortcut).
+        name: "manual_mask", "intelligent_scissors", "sam", "dextr", or None
+        for no tool. The tool already active stays active."""
+        if name is None:
+            if self.parent.tool_manager.current_tool is not None or any(
+                    b.isChecked() for b in self._tool_buttons.values()):
+                self._uncheck_others(None)
+                self.parent.tool_manager.disable_tools()
+                logger.debug("Keyboard: no tool")
+            return
+        button = self._tool_buttons[name]
+        if button.isChecked():
+            return
+        logger.debug("Keyboard: tool %s", name)
+        button.click()            # checks it and runs its handler, as a mouse click does
+
     def _uncheck_others(self, keep):
         for btn in [self.manual_mask, self.dextr, self.sam, self.intelligent_scissors]:
             if btn is not keep:
@@ -225,7 +258,7 @@ class Sidebar(QWidget):
         variant = sam_registry.get_selected_variant()
         state = "" if sam_registry.is_available(variant) else ", not downloaded yet"
         self.sam.setToolTip(f"{get_tooltip('sam')}\nCurrent model: {variant.label}{state} "
-                            "(change in Settings -> Models)")
+                            f"(change in Settings -> Models)\nShortcut: {TOOL_KEYS['sam']}")
 
     def toggle_intelligent_scissors(self):
         if self.intelligent_scissors.isChecked():
@@ -319,12 +352,6 @@ class Sidebar(QWidget):
         logger.info("Removed class %r and its %d mask(s)", class_name, count)
         self._sync_classes_to_seproj()
         # the class list and the image redraw themselves (classes_changed)
-
-    def pick_class_color(self):
-        color = QColorDialog.getColor()
-        if color.isValid():
-            self.selected_color = color
-            logger.debug("Selected color %s", color.name())
 
     def _sync_classes_to_seproj(self):
         project_root = getattr(self.parent.state_manager, "project_root", None)

@@ -1,6 +1,7 @@
 """Copy / link choice in the dialogs, New Project, and Import Images."""
 import json
 import os
+import pathlib
 import sys
 
 import pytest
@@ -90,16 +91,44 @@ def test_new_project_failure_leaves_no_half_project(qapp, tmp_path, originals, n
     assert no_popups and no_popups[0][0] == "critical"
 
 
-def test_new_project_can_ask_to_import_annotations(qapp, tmp_path, originals, no_popups):
+def test_add_folder_finds_images_in_subfolders(qapp, tmp_path, no_popups, monkeypatch):
+    """Add Folder… lists every image in the folder and its subfolders;
+    a second image with an already listed name is left out, and said so."""
+    from PyQt6.QtWidgets import QFileDialog
     from ui.dialogs.project_dialog import CreateProjectDialog
-    for checked in (False, True):
-        d = CreateProjectDialog()
-        d.path_input.setText(str(tmp_path))
-        d.name_input.setText(f"proj_{checked}")
-        d.img_list.add_file(originals[0])
-        d.annotations_check.setChecked(checked)
-        d._finalize()
-        assert d.selected_project_db and d.import_annotations is checked
+    src = tmp_path / "scans"
+    for rel in ("week 1/img2.png", "week 1/img10.png", "week 10/b.jpg", "week 2/img2.png",
+                "top.TIF", ".hidden/secret.png"):
+        make_image(src / rel)
+    (src / "week 1" / "notes.txt").write_text("not an image")
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", staticmethod(lambda *a, **k: str(src)))
+    d = CreateProjectDialog()
+    d._import_folder()
+    names = [pathlib.Path(f).name for f in d.img_list.file_list]
+    assert names == ["b.jpg", "img2.png", "img10.png", "top.TIF"]
+    assert pathlib.Path(d.img_list.file_list[1]).parent.name == "week 1"   # the first one is kept
+    assert not d.skipped_note.isHidden() and "img2.png" in d.skipped_note.text()
+    # and the project gets them all
+    d.path_input.setText(str(tmp_path))
+    d.name_input.setText("proj")
+    d._finalize()
+    assert d.selected_project_db
+    assert sorted(p.name for p in (tmp_path / "proj" / "images").iterdir()) == sorted(names)
+
+
+def test_dropping_a_folder_adds_its_images(qapp, tmp_path):
+    from ui.dialogs.project_dialog import DraggableImageList
+    make_image(tmp_path / "f" / "sub" / "a.png")
+    make_image(tmp_path / "loose.jpg")
+    lst = DraggableImageList()
+    added, skipped = lst.add_paths([tmp_path / "f", tmp_path / "loose.jpg", tmp_path / "nothing.txt"])
+    assert added == 2 and skipped == []
+    assert [pathlib.Path(f).name for f in lst.file_list] == ["a.png", "loose.jpg"]
+
+
+def test_new_project_has_no_annotations_checkbox(qapp):
+    from ui.dialogs.project_dialog import CreateProjectDialog
+    assert not hasattr(CreateProjectDialog(), "annotations_check")
 
 
 def test_new_project_refuses_when_copies_do_not_fit(qapp, tmp_path, originals, no_popups, monkeypatch):

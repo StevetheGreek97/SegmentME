@@ -92,10 +92,6 @@ else:
         window = MainApp(db_path=dialog.selected_project_path)
         initialize_project(window, dialog.selected_project_path)
         window.show()
-        if getattr(dialog, "import_annotations", False):
-            # New Project with "Also import annotations": once the window is up
-            from PyQt6.QtCore import QTimer
-            QTimer.singleShot(0, window.import_annotations)
         sys.exit(app.exec())
     else:
         sys.exit(0)

@@ -40,6 +40,7 @@ class MenuBar(QMenuBar):
 
         actions = [
             ("Import Images", self.parent.import_images),
+            ("Import Image Folder…", self.parent.import_image_folder),
             ("Import Annotations…", self.parent.import_annotations),
             ("Annotations", self.parent.show_results ), #self.parent.toggle_results_dock
             ("Save Results…", self.parent.save_results_csv),
@@ -57,6 +58,7 @@ class MenuBar(QMenuBar):
             ("Run Inference", lambda: self.parent.popup_inference_dialog('Running inference...')),
              ("Train Custom Model", self.parent.popup_training_dialog),
             ("Set Scale…", self.parent.set_scale),
+            ("Class Colours…", self.parent.edit_class_colors),
         ]
 
         self._add_actions_to_menu(actions_menu, actions)
