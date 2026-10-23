@@ -477,10 +477,37 @@ class ImageDisplay(QGraphicsView):
 
     # ---------- Events ----------
 
+    # Mouse wheel, as in Inkscape: Ctrl = move up / down, Shift = left /
+    # right; a plain wheel zooms (Inkscape scrolls there; zoom is this app's
+    # habit). A sideways touchpad swipe moves left / right.
+    PAN_PX_PER_NOTCH = 60
+
     def wheelEvent(self, event):
         if self._edit_mode is not None and self._edit_mode.wheel(event):
             return
 
+        mods = event.modifiers()
+        ctrl = bool(mods & Qt.KeyboardModifier.ControlModifier)
+        shift = bool(mods & Qt.KeyboardModifier.ShiftModifier)
+        delta = event.angleDelta()
+        if ctrl != shift or (delta.y() == 0 and delta.x() != 0):
+            self._pan_by_wheel(event, horizontal=shift or (not ctrl and delta.y() == 0))
+            return
+        self._zoom_by_wheel(event)
+
+    def _pan_by_wheel(self, event, horizontal):
+        """Scroll the image by the wheel. Some systems deliver Shift+wheel
+        as a sideways scroll already, so either direction of the event counts."""
+        pixels = event.pixelDelta()             # touchpads: exact pixels
+        amount = (pixels.x() or pixels.y()) if horizontal else (pixels.y() or pixels.x())
+        if not amount:
+            delta = event.angleDelta()          # mouse wheels: 120 per notch
+            notches = ((delta.x() or delta.y()) if horizontal else (delta.y() or delta.x())) / 120
+            amount = round(notches * self.PAN_PX_PER_NOTCH)
+        bar = self.horizontalScrollBar() if horizontal else self.verticalScrollBar()
+        bar.setValue(bar.value() - amount)
+
+    def _zoom_by_wheel(self, event):
         zoom_step = 1.1
         if event.angleDelta().y() > 0:
             if self._can_zoom_in():
