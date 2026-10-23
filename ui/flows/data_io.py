@@ -6,14 +6,13 @@ window; the window's menu methods call them.
 import os
 from pathlib import Path
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QApplication, QDialog, QFileDialog, QMessageBox
+from PyQt6.QtWidgets import QDialog, QFileDialog, QMessageBox
 
 from core.exporters.coco_exporter import COCOExporter
 from core.exporters.yolo_exporter import YOLOExporter
 from core.importers.yolo_importer import ImportCancelled, ImportFailed, describe, run_import
 from services import image_files
-from services.file_handlers import find_images, loader
+from services.file_handlers import loader
 from services.logger import get_logger
 from services.seproj import update_classes as seproj_update_classes
 from services.seproj import update_images as seproj_update_images
@@ -34,24 +33,6 @@ def import_images(window):
     )
     if files:
         add_images(window, files)
-
-
-def import_image_folder(window):
-    """File > Import Image Folder: every image in a folder and its subfolders."""
-    folder = QFileDialog.getExistingDirectory(window, "Select a Folder of Images (subfolders included)")
-    if not folder:
-        return
-    QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)   # a cloud folder lists slowly
-    try:
-        files = find_images(folder)
-    finally:
-        QApplication.restoreOverrideCursor()
-    if not files:
-        QMessageBox.information(window, "Import Image Folder",
-                                f"No images found in\n{folder}\nor its subfolders.")
-        return
-    logger.info("Import Image Folder: %d image(s) in %s and its subfolders", len(files), folder)
-    add_images(window, files)
 
 
 def _unique_names(files):
@@ -159,6 +140,9 @@ def import_annotations(window):
         # Own connection: the worker thread writes while the window's
         # connection keeps reading (WAL). All or nothing, as before.
         from core.database.connection import DatabaseConnection
+        from services.backups import make_backup
+        progress(0, 0, "Backing up the project first…")
+        make_backup(db_path, "before import")   # File > Restore Backup… undoes the import
         db = DatabaseConnection(db_path)
         try:
             def report(done, total, name):

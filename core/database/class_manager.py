@@ -29,6 +29,7 @@ class ClassDatabaseManager:
             "INSERT OR IGNORE INTO classes (class_name, color) VALUES (?, ?)",
             (class_name, color.name())
         )
+        logger.info("Added class %r (%s)", class_name, color.name())
         self.parent.classes_changed.emit()
 
     def remove_class(self, class_name):
@@ -36,6 +37,7 @@ class ClassDatabaseManager:
         Remove a class by name.
         """
         self.db.execute_query("DELETE FROM classes WHERE class_name = ?", (class_name,))
+        logger.info("Removed class %r", class_name)
         self.parent.classes_changed.emit()
 
     def get_class_id(self, class_name):

@@ -61,21 +61,12 @@ def _project_root_from_db(db_path: str) -> Path:
 
 def load_recent_projects() -> List[str]:
     """
-    Returns a *clean* list of existing db paths.
-    Also rewrites recent.json to drop missing entries.
+    The recent projects' database paths, newest first -- including ones
+    that are not found right now: a project on a USB or network drive that
+    is not connected must not drop off the list for good. The list shows
+    those as "not found"; the user removes them.
     """
-    f = get_recent_file()
-    items = _read_json_safely(f)
-    existing = []
-    changed = False
-    for p in items:
-        if os.path.exists(p):
-            existing.append(p)
-        else:
-            changed = True
-    if changed:
-        _write_json_safely(f, existing)
-    return existing
+    return _read_json_safely(get_recent_file())
 
 def all_recent_projects_raw() -> List[str]:
     """
@@ -104,21 +95,63 @@ def remove_recent_project(db_path: str):
         items.remove(db_path)
         _write_json_safely(get_recent_file(), items)
 
-def delete_project_and_remove_recent(db_path: str) -> bool:
-    """
-    Deletes the project folder (…/<project>) if it exists and removes the entry.
-    Returns True if folder was deleted or didn’t exist; False on failure.
-    """
+def project_root_to_delete(db_path: str):
+    """The project folder of `db_path`, only when it really is a SegmentME
+    project: the database sits in <project>/.segmentme/ and the folder has
+    a .SEproj file. Anything else (an old masks.db lying in some folder)
+    gives None, so "Delete" can never take a parent folder with it."""
+    db = Path(db_path).absolute()
+    if db.parent.name != ".segmentme":
+        return None
+    root = db.parent.parent
     try:
-        root = _project_root_from_db(db_path)
+        if root == root.parent or root.resolve() in (Path.home().resolve(), Path.home().resolve().parent):
+            return None
+        if not any(root.glob("*.SEproj")):
+            return None
+    except OSError:
+        return None
+    return root
+
+
+# What delete_project() did
+TRASHED, DELETED, NOT_A_PROJECT, NO_TRASH, FAILED, ALREADY_GONE = (
+    "trashed", "deleted", "not a project", "no trash", "failed", "already gone")
+
+
+def delete_project(db_path: str, permanently: bool = False) -> str:
+    """Move a project's folder to the Trash / Recycle Bin (or, with
+    permanently=True, delete it) and take it off the recent list.
+    Linked images are links inside the folder: their originals are never
+    touched. Returns one of the constants above; nothing is deleted for
+    NOT_A_PROJECT and NO_TRASH (the Trash is not available there, e.g. some
+    USB and network drives: ask before calling again with permanently=True)."""
+    root = project_root_to_delete(db_path)
+    if root is None:
+        if not Path(db_path).exists():
+            remove_recent_project(db_path)
+            return ALREADY_GONE
+        logger.warning("Refusing to delete %s: not inside a SegmentME project folder", db_path)
         remove_recent_project(db_path)
-        if root.exists():
+        return NOT_A_PROJECT
+    try:
+        if permanently:
             shutil.rmtree(root)
-        logger.info("Deleted project folder %s", root)
-        return True
+            logger.info("Deleted project folder %s", root)
+            remove_recent_project(db_path)
+            return DELETED
+        from PyQt6.QtCore import QFile
+        if QFile.moveToTrash(str(root)):
+            logger.info("Moved project folder %s to the trash", root)
+            remove_recent_project(db_path)
+            return TRASHED
+        logger.warning("Could not move %s to the trash", root)
+        return NO_TRASH
     except Exception:
-        logger.exception("Failed to delete project folder for %s", db_path)
-        return False
+        logger.exception("Failed to delete project folder %s", root)
+        return FAILED
+
+
 
 _CHUNK = 900  # stay under SQLite's 999-variable limit
 
@@ -128,6 +161,7 @@ def _sync_seproj_images(main_window, project_root, image_paths) -> bool:
     If images are missing: show a popup, delete their masks from the DB
     via the app's own connection (no stale snapshot), emit masks_updated,
     and update the .SEproj. Returns False if the user cancels.
+    A backup is made first, so File > Restore Backup… can undo it.
     """
     saved = get_saved_images(project_root)
     actual_names = [os.path.basename(p) for p in image_paths]
@@ -153,6 +187,7 @@ def _sync_seproj_images(main_window, project_root, image_paths) -> bool:
         f"{len(missing)} image(s) were removed from the project folder:\n\n"
         f"{preview}\n\n"
         f"Their annotations will be removed from the database.\n"
+        f"(A backup is made first: File > Restore Backup… brings them back.)\n\n"
         f"Do you want to continue?",
         QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
     )
@@ -163,6 +198,8 @@ def _sync_seproj_images(main_window, project_root, image_paths) -> bool:
     # stores filenames WITH extension (e.g. "fish1.jpg") — strip before deleting.
     missing_db = [os.path.splitext(n)[0] for n in missing]
 
+    from services.backups import make_backup
+    make_backup(main_window.state_manager.db.db_path, "before removing missing images")
     try:
         main_window.state_manager.mask_manager.delete_for_images(missing_db, chunk=_CHUNK)
     except Exception as exc:
@@ -184,25 +221,46 @@ def initialize_project(main_window, db_path):
     config = ProjectConfigManager(project_root)
 
     images_dir = config.get_images_dir()
-    if not os.path.exists(images_dir):
+    if not os.path.isdir(images_dir):
         reply = QMessageBox.question(
             main_window, "Images Folder Not Found",
-            f"The folder '{images_dir}' does not exist.\nWould you like to locate it?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            f"The project's images folder was not found:\n{images_dir}\n\n"
+            "If it is on a drive that is not connected, connect it and open the project "
+            "again. Do you want to choose the folder now?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
         )
+        folder = ""
         if reply == QMessageBox.StandardButton.Yes:
             folder = QFileDialog.getExistingDirectory(main_window, "Locate Images Folder")
-            if folder:
-                relative = os.path.relpath(folder, project_root)
-                config.set_images_dir(relative)
-                images_dir = folder
-            else:
-                return  # User canceled
+        if folder:
+            try:
+                stored = os.path.relpath(folder, project_root)
+            except ValueError:            # Windows: another drive (D:, a USB stick)
+                stored = os.path.abspath(folder)
+            config.set_images_dir(stored)
+            images_dir = folder
+        else:
+            # Open without images; the project file and masks stay as they are.
+            logger.warning("Images folder %s not found; project opened without images", images_dir)
+            main_window.project_root = project_root
+            main_window.config = config
+            return
 
-    image_paths = loader(images_dir)
+    try:
+        image_paths = loader(images_dir) or []
+    except OSError as exc:                # e.g. a network drive that dropped out
+        logger.exception("Could not list %s", images_dir)
+        QMessageBox.warning(main_window, "Images Folder",
+                            f"The images folder could not be read:\n{images_dir}\n\n{exc}")
+        main_window.project_root = project_root
+        main_window.config = config
+        return
 
     if not _sync_seproj_images(main_window, project_root, image_paths):
         return  # User canceled on missing-images dialog
+    main_window.project_root = project_root
+    main_window.config = config
 
     if image_paths:
         logger.info("Loaded %d image(s) from %s", len(image_paths), images_dir)

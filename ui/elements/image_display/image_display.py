@@ -6,6 +6,7 @@ from PyQt6.QtGui import QPixmap, QPainter, QPolygonF
 from ui.custom_components.mask_context_menu import MaskContextMenu
 from ui.elements.image_display.edit_modes import SplitStrokeMode, BrushEditMode
 from services.logger import get_logger
+from ui import diagnostics
 from services.image_files import missing_image_message
 from ui.elements.image_display.scale_bar import ScaleBar
 from ui.elements.image_display.selection_outlines import SelectionOutlines
@@ -600,9 +601,16 @@ class ImageDisplay(QGraphicsView):
 
             if self._edit_mode is not None and self._edit_mode.mouse_press(
                     point, Qt.MouseButton.LeftButton):
+                diagnostics.action("Image left-click at %s in %s", point,
+                                   type(self._edit_mode).__name__, level=10)
                 return
 
             selected_mask_ids = self.get_clicked_masks(point)
+            tool = self._current_tool()
+            diagnostics.action("Image left-click at %s on %s: tool %s, masks hit %s",
+                               point, self.parent.state_manager.current_image_name,
+                               type(tool).__name__ if tool else "none", selected_mask_ids,
+                               level=10)
 
             if selected_mask_ids:
                 self._select_masks(selected_mask_ids)
@@ -616,6 +624,12 @@ class ImageDisplay(QGraphicsView):
                 tool.left_click(point, ctrl)
 
         elif event.button() == Qt.MouseButton.RightButton:
+            tool = self._current_tool()
+            diagnostics.action("Image right-click on %s: tool %s, edit mode %s",
+                               self.parent.state_manager.current_image_name,
+                               type(tool).__name__ if tool else "none",
+                               type(self._edit_mode).__name__ if self._edit_mode else "none",
+                               level=10)
             if self._edit_mode is not None:
                 scene_pos = self.mapToScene(event.position().toPoint())
                 point = (int(scene_pos.x()), int(scene_pos.y()))

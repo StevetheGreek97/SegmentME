@@ -34,10 +34,14 @@ class MaskDatabaseManager:
         """
         surface_area = cv2.contourArea(mask.astype(np.int32))
         mask_bytes = mask.tobytes()  # Convert NumPy array to bytes
+        if len(mask) < 3:
+            logger.warning("Saving a mask with only %d point(s) on %s", len(mask), image_name)
         self.db.execute_query(
             "INSERT INTO masks (image_name, mask_data, class_name, surface_area) VALUES (?, ?, ?, ?)",
             (image_name, mask_bytes, class_name, surface_area)
         )
+        logger.debug("Saved mask on %s: class %r, %d points, area %.0f px",
+                     image_name, class_name, len(mask), surface_area)
         self.parent.masks_updated.emit()
 
     def load_masks(self, image_name):
@@ -63,7 +67,8 @@ class MaskDatabaseManager:
         """
         Delete all masks from the database.
         """
-        self.db.execute_query("DELETE FROM masks")
+        rows = self.db.execute_query("DELETE FROM masks")
+        logger.warning("Deleted ALL masks (%s row(s))", rows)
         self.parent.masks_updated.emit()
 
     def rename_mask(self, image_name, mask_id, new_class_name):
@@ -79,14 +84,17 @@ class MaskDatabaseManager:
             "UPDATE masks SET class_name = ? WHERE image_name = ? AND id = ?",
             (new_class_name, image_name, mask_id)
         )
+        logger.info("Mask %s on %s is now class %r", mask_id, image_name, new_class_name)
         self.parent.masks_updated.emit()
     def assign_class(self, rows, new_class):
         """Give the masks [(image_name, mask_id), ...] the class new_class,
         in one transaction and with one masks_updated."""
+        rows = list(rows)
         with self.db.transaction():
             self.db.executemany(
                 "UPDATE masks SET class_name = ? WHERE image_name = ? AND id = ?",
                 [(new_class, image_name, mask_id) for image_name, mask_id in rows])
+        logger.info("%d mask(s) are now class %r", len(rows), new_class)
         self.parent.masks_updated.emit()
 
     def reindex_masks(self):
@@ -152,6 +160,9 @@ class MaskDatabaseManager:
         self.parent.masks_updated.emit()
 
         info = {'chunks': chunks, 'rows': rows_total, 'ms': (t1 - t0) * 1000.0}
+        shown_ids = [int(i) for i in list(mask_ids)[:21]]
+        logger.info("Deleted %d mask(s) on %s (ids %s%s)", rows_total, image_name,
+                    shown_ids[:20], " …" if len(shown_ids) > 20 else "")
         if profile:
             logger.debug("delete_masks: %d row(s) in %d chunk(s), %.2f ms",
                          rows_total, chunks, info['ms'])
@@ -210,4 +221,6 @@ class MaskDatabaseManager:
                 part = image_names[i:i + chunk]
                 self.db.execute_query(
                     f"DELETE FROM masks WHERE image_name IN ({','.join('?' * len(part))})", part)
+        logger.info("Deleted the masks of %d image(s): %s", len(image_names),
+                    ", ".join(image_names[:20]) + (" …" if len(image_names) > 20 else ""))
         self.parent.masks_updated.emit()

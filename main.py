@@ -44,6 +44,16 @@ app = QApplication(sys.argv)
 app.setApplicationName("SegmentME")
 QApplication.setDesktopFileName("segmentme")
 
+# An unexpected error in any button or menu shows a message and is logged,
+# instead of PyQt6 closing the whole app (ui/crash_handler.py).
+from ui.crash_handler import install as install_crash_handler
+install_crash_handler()
+
+# Detailed log: system report, user actions, Qt warnings, freezes, native
+# crashes (ui/diagnostics.py; the file is in Help > Open Log Folder).
+from ui import diagnostics
+diagnostics.start_session(app)
+
 # Show the splash screen before the remaining slow imports below
 # (ultralytics, the rest of the Qt UI) run, and before the startup dialog
 # or main window is built -- those take a couple of seconds in a frozen
@@ -57,6 +67,7 @@ from ui.main_window import MainApp
 app.processEvents()
 from ui.dialogs.project_dialog import ProjectStartupDialog
 from services.recent_projects import save_recent_project, initialize_project
+from ui.project_lock import lock_project
 from services.logger import get_logger
 app.processEvents()
 
@@ -70,9 +81,13 @@ if len(sys.argv) > 1 and sys.argv[1].lower().endswith(".seproj"):
     db_path = project_path / ".segmentme" / "masks.db"
 
     if db_path.exists():
+        go_on, project_lock = lock_project(db_path)
+        if not go_on:
+            sys.exit(0)
         save_recent_project(str(db_path))
         window = MainApp(db_path=str(db_path))
         initialize_project(window, str(db_path))
+        diagnostics.log_project_opened(window)
         splash.finish(window)
         window.show()
         sys.exit(app.exec())
@@ -87,10 +102,14 @@ if len(sys.argv) > 1 and sys.argv[1].lower().endswith(".seproj"):
 else:
     splash.close()
     dialog = ProjectStartupDialog()
-    if dialog.exec() == dialog.Accepted:
+    while dialog.exec() == dialog.Accepted:
+        go_on, project_lock = lock_project(dialog.selected_project_path)
+        if not go_on:
+            continue                      # back to the project list
         save_recent_project(dialog.selected_project_path)
         window = MainApp(db_path=dialog.selected_project_path)
         initialize_project(window, dialog.selected_project_path)
+        diagnostics.log_project_opened(window)
         window.show()
         sys.exit(app.exec())
     else:

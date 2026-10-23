@@ -33,6 +33,12 @@ class InferenceRun:
         if not state.image_paths:
             logger.warning("Inference requested with no images loaded")
             return
+        if self.running:
+            from ui.dialogs.confirm import ask_to_stop
+            if not ask_to_stop(window, "Inference Running",
+                               f"An inference is already running ({self.manager.progress_text()}).\n\n"
+                               "Stop it and start a new one?", stop_label="Stop and Start New"):
+                return
 
         # YOLO weights on offer: the user's models/yolo folder plus best.pt
         # of every training run in this project.
@@ -81,6 +87,10 @@ class InferenceRun:
             hires_params=hires_params,
         )
 
+    @property
+    def running(self) -> bool:
+        return self.manager is not None and self.manager.running
+
     def stop(self):
         if self.manager:
             self.manager.stop_inference()
@@ -123,6 +133,23 @@ class TrainingRun:
 
         self.thread.start()
         self.monitor.exec()
+
+    @property
+    def running(self) -> bool:
+        try:
+            return self.thread is not None and self.thread.isRunning()
+        except RuntimeError:              # the thread object is already deleted
+            return False
+
+    def stop(self):
+        """The app is closing: stop training and wait for it."""
+        if self.running and self.worker is not None:
+            try:
+                self.worker.stop()
+            except RuntimeError:
+                pass
+            self.thread.quit()
+            self.thread.wait(15000)
 
     def _finished(self):
         monitor = self.monitor

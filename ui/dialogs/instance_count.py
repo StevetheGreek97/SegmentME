@@ -82,6 +82,7 @@ class MaskStatisticsDock(QDockWidget):
         try:
             um, unit, unit_um = self.parent.current_image_scale()
         except Exception:
+            logger.exception("Could not read the scale of %s; statistics shown in pixels", name)
             um, unit, unit_um = None, "px", 1.0
         lengths = defaultdict(list)
         try:

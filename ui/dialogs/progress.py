@@ -11,6 +11,7 @@ class InferenceProgressDialog(QDialog):
     """Non-modal progress window for one inference run.
 
     While the run is going, Cancel, the window's close button and Esc all
+    ask first ("Stop Inference?", Keep Running is the default) and then
     emit `canceled`. When the run ends, finish() closes the window -- unless
     the log is open or the caller asks to keep it, in which case it stays up
     with a Close button so the log can still be read.
@@ -106,12 +107,26 @@ class InferenceProgressDialog(QDialog):
             scroll.setValue(scroll.maximum())
         self.adjustSize()
 
+    def items_done(self) -> int:
+        return self.bar.value() // self._STEPS_PER_ITEM
+
     def closeEvent(self, event):
         # Deliberately not QDialog.closeEvent (that routes through reject()).
         if self._running:
+            if not self.confirm_cancel():
+                event.ignore()
+                return
             self._running = False
             self.canceled.emit()
         event.accept()
+
+    def confirm_cancel(self) -> bool:
+        """Cancel, Esc and the close button ask first: a run can take hours."""
+        from ui.dialogs.confirm import ask_to_stop
+        return ask_to_stop(
+            self, "Stop Inference?",
+            f"{self.items_done()} of {self._total} image(s) are done; their masks are kept.\n\n"
+            "Stop the rest?", stop_label="Stop Inference")
 
     def reject(self):  # Esc
         self.close()

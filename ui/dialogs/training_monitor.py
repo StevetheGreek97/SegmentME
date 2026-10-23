@@ -43,7 +43,8 @@ class TrainingMonitor(QDialog):
 
         # Stop button
         self.stop_btn = QPushButton("🛑 Stop Training")
-        self.stop_btn.clicked.connect(self._on_stop)
+        self.stop_btn.setAutoDefault(False)   # Enter must not stop hours of training
+        self.stop_btn.clicked.connect(self._ask_stop)
 
         # Layout
         layout = QVBoxLayout(self)
@@ -110,6 +111,30 @@ class TrainingMonitor(QDialog):
     def set_stop_callback(self, callback):
         self.stop_callback = callback
 
+    def training(self) -> bool:
+        try:
+            return (not self._stop_requested and self.thread is not None
+                    and self.thread.isRunning())
+        except RuntimeError:              # thread already deleted
+            return False
+
+    def confirm_stop(self) -> bool:
+        from ui.dialogs.confirm import ask_to_stop
+        return ask_to_stop(
+            self, "Stop Training?",
+            "Training is still running. Stop it now?\n\nThe best model so far is kept "
+            "(in the project's trainings folder).", stop_label="Stop Training")
+
+    def _ask_stop(self):
+        if self.training() and not self.confirm_stop():
+            return
+        self._on_stop()
+
+    def reject(self):
+        """Esc: same as the close button (it used to hide the window while
+        training went on unseen)."""
+        self.close()
+
     def _on_stop(self):
         self._stop_requested = True
         self.timer.stop()
@@ -124,7 +149,11 @@ class TrainingMonitor(QDialog):
 
 
     def closeEvent(self, event):
-        self._on_stop()
+        if self.training() and not self.confirm_stop():
+            event.ignore()
+            return
+        if not self._stop_requested:
+            self._on_stop()
 
         if self.thread and self.thread.isRunning():
             logger.debug("Waiting for training thread to stop")

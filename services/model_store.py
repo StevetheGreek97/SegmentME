@@ -308,13 +308,15 @@ def _content_range_total(response, fallback: int) -> int:
 
 
 def download_url(url: str, target: Path, expected_size: int = 0,
-                 progress=None, should_cancel=None, chunk_size: int = 1 << 20) -> Path:
+                 progress=None, should_cancel=None, chunk_size: int = 1 << 20,
+                 context=None) -> Path:
     """Stream `url` into `target`, resuming a previous partial download.
 
     Data is written to `<target>.part` and renamed only once complete and
     (when `expected_size` is known) the right size. `progress(done, total)`
     is called after every chunk; `should_cancel()` returning True aborts
     with DownloadCancelled, keeping the partial file for a later resume.
+    `context` is an optional ssl.SSLContext for HTTPS.
     """
     target = Path(target)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -330,12 +332,13 @@ def download_url(url: str, target: Path, expected_size: int = 0,
         headers["Range"] = f"bytes={existing}-"
     request = urllib.request.Request(url, headers=headers)
     try:
-        response = urllib.request.urlopen(request, timeout=60)
+        response = urllib.request.urlopen(request, timeout=60, context=context)
     except urllib.error.HTTPError as exc:
         if exc.code == 416 and existing:
             # Server says our partial file is already past the end: start over.
             part.unlink()
-            return download_url(url, target, expected_size, progress, should_cancel, chunk_size)
+            return download_url(url, target, expected_size, progress, should_cancel,
+                                chunk_size, context)
         raise RuntimeError(f"Download failed: HTTP {exc.code} {exc.reason} ({url})") from exc
     except urllib.error.URLError as exc:
         raise RuntimeError(f"Download failed: {exc.reason} ({url})") from exc

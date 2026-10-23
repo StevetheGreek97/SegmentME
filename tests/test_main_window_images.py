@@ -115,8 +115,8 @@ def test_deleting_a_linked_project_keeps_the_originals(window, tmp_path, origina
     _import(window, originals, image_files.LINK, monkeypatch)
     window.state_manager.db.conn.close()
     monkeypatch.setattr(recent_projects, "remove_recent_project", lambda db_path: None)
-    assert recent_projects.delete_project_and_remove_recent(
-        str(tmp_path / "proj" / ".segmentme" / "masks.db"))
+    assert recent_projects.delete_project(
+        str(tmp_path / "proj" / ".segmentme" / "masks.db"), permanently=True) == recent_projects.DELETED
     assert not (tmp_path / "proj").exists()
     assert all(f.exists() and f.stat().st_size > 0 for f in originals)
 
@@ -369,7 +369,7 @@ def test_import_annotations_opens_the_dialog_first(window, monkeypatch, qapp):
 
 
 # --------------------------------------------------------------------------
-# Scale, scale bar, measurements in the table / statistics, Save Results
+# Scale, scale bar, measurements in the table / statistics, Export Morphometrics
 # --------------------------------------------------------------------------
 def _scan_window(window, tmp_path, qapp):
     """Add a 2540 DPI image (10 µm per pixel) with two masks and show it."""
@@ -519,7 +519,7 @@ def test_save_results_writes_measurements(window, tmp_path, qapp, monkeypatch, n
         return QDialog.DialogCode.Accepted
     monkeypatch.setattr(mw.SaveResultsDialog, "exec", accept)
     for action in window.menuBar().actions()[0].menu().actions():
-        if action.text() == "Save Results…":
+        if action.text() == "Export Morphometrics…":
             action.trigger()                                # as from the menu
     rows = list(csv.DictReader(open(out, newline="", encoding="utf-8")))
     assert sorted(float(r["length_mm"]) for r in rows) == [pytest.approx(0.5), pytest.approx(2.0)]
@@ -1025,22 +1025,22 @@ def test_array_item_shares_memory_and_repaints_in_place(qapp):
 
 
 # --------------------------------------------------------------------------
-# File > Import Image Folder: a folder with its subfolders
+# File > Import Images: files with the same name from different folders
 # --------------------------------------------------------------------------
-def test_import_image_folder_includes_subfolders(window, tmp_path, monkeypatch, no_popups):
+def test_import_images_skips_duplicate_names(window, tmp_path, monkeypatch, no_popups):
     from PyQt6.QtWidgets import QDialog, QFileDialog
     import ui.flows.data_io as flows
     src = tmp_path / "scans"
-    for rel in ("week 1/a.png", "week 2/deep/b.jpg", "week 2/a.png", "c.tif"):
-        make_image(src / rel)
-    monkeypatch.setattr(QFileDialog, "getExistingDirectory", staticmethod(lambda *a, **k: str(src)))
+    files = [make_image(src / rel) for rel in ("week 1/a.png", "week 2/b.jpg", "week 2/a.png", "c.tif")]
+    monkeypatch.setattr(QFileDialog, "getOpenFileNames",
+                        staticmethod(lambda *a, **k: ([str(f) for f in files], "")))
 
     class Choose(flows.ImageModeDialog):
         def exec(self):
             self.choice.set_mode(image_files.COPY)
             return QDialog.DialogCode.Accepted
     monkeypatch.setattr(flows, "ImageModeDialog", Choose)
-    window.import_image_folder()
+    window.import_images()
     images = tmp_path / "proj" / "images"
     assert sorted(os.listdir(images)) == ["a.png", "b.jpg", "c.tif", "first.png"]
     assert len(window.state_manager.image_paths) == 4
@@ -1048,6 +1048,6 @@ def test_import_image_folder_includes_subfolders(window, tmp_path, monkeypatch, 
     assert "Imported 3 images" in report and "a.png: another image with this name" in report
 
 
-def test_menu_has_import_image_folder(window):
+def test_file_menu_has_no_import_image_folder(window):
     texts = [a.text() for a in window.menuBar().actions()[0].menu().actions()]
-    assert "Import Image Folder…" in texts
+    assert "Import Image Folder…" not in texts and "Import Images" in texts

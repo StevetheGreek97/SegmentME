@@ -7,6 +7,10 @@ from core.trainer.trainer_settings import TrainingSettings
 from services.hardware import auto_detect_device 
 from pathlib import Path
 
+from services.logger import get_logger
+
+logger = get_logger(__name__)
+
 class TrainingDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__()
@@ -277,17 +281,59 @@ class TrainingDialog(QDialog):
         self.augment_tab.setLayout(layout)
 
     def validate_and_accept(self):
+        """Training learns from the exported dataset (File > Export
+        annotations). Offer to export when that was never done, or when the
+        masks changed after the last export (it would train on old masks)."""
         missing = self.validate_project_structure(self.project_root)
         if missing:
-            QMessageBox.warning(
-                self,
-                "Missing Files or Folders",
-                "The following required items are missing in the project root:\n\n" +
-                "\n".join(missing) +
-                "\n\nPlease fix the issues before starting training."
-            )
-            return
+            logger.info("Training needs an export first; missing %s", missing)
+            if not self._ask_export(
+                    "Export Needed",
+                    "Training learns from your annotations exported as a dataset, and they "
+                    "have not been exported yet.\n\nExport them now?",
+                    "Export Now", None):
+                return
+        elif self.export_is_outdated():
+            answer = self._ask_export(
+                "Annotations Changed",
+                "You changed masks or classes after the last export, so training would use "
+                "the old annotations.\n\nExport them again first?",
+                "Export Again", "Train on Old Export")
+            if answer is None:                       # Cancel
+                return
+        if self.validate_project_structure(self.project_root):
+            return                                   # export cancelled or failed
         self.accept()
+
+    def _ask_export(self, title, text, export_label, skip_label):
+        """True after exporting, False when skipped (skip_label), None on Cancel."""
+        box = QMessageBox(QMessageBox.Icon.Question, title, text, parent=self)
+        export = box.addButton(export_label, QMessageBox.ButtonRole.AcceptRole)
+        skip = box.addButton(skip_label, QMessageBox.ButtonRole.ActionRole) if skip_label else None
+        cancel = box.addButton(QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(export)
+        box.setEscapeButton(cancel)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is export:
+            from ui.flows import data_io
+            data_io.export_annotations_dataset(self.parent)
+            return True
+        if skip is not None and clicked is skip:
+            return False
+        return None
+
+    def export_is_outdated(self) -> bool:
+        """The project database changed after data.yaml was written."""
+        exported = self.project_root / "data.yaml"
+        db = Path(self.parent.state_manager.db.db_path)
+        try:
+            export_time = exported.stat().st_mtime
+            changed = max(p.stat().st_mtime for p in (db, db.with_name(db.name + "-wal"))
+                          if p.exists())
+        except (OSError, ValueError):
+            return False
+        return changed > export_time + 5
 
     def validate_project_structure(self, root: Path):
         required = [

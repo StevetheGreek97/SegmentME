@@ -10,6 +10,8 @@ from PyQt6.QtGui import QIcon
 from core.managers.tool_manager import ToolManager
 from core.measure.scale import ProjectScale
 from core.state import StateManager
+from services import backups
+from ui import diagnostics
 from services.file_handlers import get_resource_path
 from services.logger import get_logger, log_memory_usage
 from ui.dialogs.class_colors_dialog import ClassColorsDialog
@@ -17,6 +19,7 @@ from ui.dialogs.instance_count import MaskStatisticsDock
 from ui.dialogs.results_dialog import SaveResultsDialog, run_results_export
 from ui.dialogs.scale_dialog import ScaleDialog
 from ui.dialogs.table import MaskResultsDock
+from ui.dialogs.update_dialog import Updater
 from ui.elements.image_display.image_display import ImageDisplay
 from ui.elements.menubar import MenuBar
 from ui.elements.sidebar import NO_TOOL_KEY, TOOL_KEYS, Sidebar
@@ -25,6 +28,8 @@ from ui.flows import data_io
 from ui.flows.runs import InferenceRun, TrainingRun
 
 logger = get_logger(__name__)
+
+BACKUP_EVERY_MS = 20 * 60 * 1000
 
 
 class MainApp(QMainWindow):
@@ -43,6 +48,7 @@ class MainApp(QMainWindow):
         self.tool_manager = ToolManager(self)
         self.inference = InferenceRun(self)     # Run Inference (ui/flows/runs.py)
         self.training = TrainingRun(self)       # Train Custom Model
+        self.updater = Updater(self)            # new versions (ui/dialogs/update_dialog.py)
 
         # UI widgets
         self.image_display = ImageDisplay(self)
@@ -87,12 +93,23 @@ class MainApp(QMainWindow):
         # Global key handling
         QApplication.instance().installEventFilter(self)
 
+        # The quiet daily update check, once the window is up (packaged app only)
+        QTimer.singleShot(5000, self.updater.check_on_start)
+
+        # Automatic database backups (services/backups.py): one when the
+        # project opens, then every 20 minutes while something changed.
+        self._changed_since_backup = False
+        self.state_manager.masks_updated.connect(self._note_change)
+        self.state_manager.classes_changed.connect(self._note_change)
+        self._backup_timer = QTimer(self)
+        self._backup_timer.setInterval(BACKUP_EVERY_MS)
+        self._backup_timer.timeout.connect(self._backup_if_changed)
+        self._backup_timer.start()
+        QTimer.singleShot(0, lambda: self.backup_in_background("opened"))
+
     # ---------- Import / export (see ui/flows/data_io.py) ----------
     def import_images(self):
         data_io.import_images(self)
-
-    def import_image_folder(self):
-        data_io.import_image_folder(self)
 
     def import_annotations(self):
         data_io.import_annotations(self)
@@ -133,6 +150,42 @@ class MainApp(QMainWindow):
                          len(self.state_manager.image_paths))
         else:
             logger.debug("Already at the first image")
+
+    # ---------- Backups (services/backups.py) ----------
+    def _note_change(self):
+        self._changed_since_backup = True
+
+    def _backup_if_changed(self):
+        if self._changed_since_backup:
+            self._changed_since_backup = False
+            self.backup_in_background("automatic")
+
+    def backup_in_background(self, reason):
+        """Copy the database on a worker thread (its own connection)."""
+        import threading
+        db_path = self.state_manager.db.db_path
+        thread = threading.Thread(target=backups.make_backup, args=(db_path, reason),
+                                  name="backup", daemon=True)
+        thread.start()
+        return thread
+
+    def backup_now(self, reason):
+        """A copy before a risky action, made before it starts."""
+        return backups.make_backup(self.state_manager.db.db_path, reason)
+
+    def restore_backup(self):
+        """File > Restore Backup…"""
+        from ui.dialogs.restore_dialog import RestoreBackupDialog
+        dialog = RestoreBackupDialog(self)
+        dialog.exec()
+        return dialog
+
+    def after_restore(self):
+        """The database was replaced by a backup: everything shows it."""
+        self.image_display.clear_selection()
+        self.sidebar._sync_classes_to_seproj()
+        self.state_manager.classes_changed.emit()
+        self.state_manager.masks_updated.emit()
 
     # ---------- Classes ----------
     def edit_class_colors(self):
@@ -236,6 +289,7 @@ class MainApp(QMainWindow):
             return False
         if self.image_display._edit_mode is not None:
             return False
+        diagnostics.action("Key %s: tool %s", event.text().upper(), self._TOOL_BY_KEY[event.key()])
         self.sidebar.select_tool(self._TOOL_BY_KEY[event.key()])
         return True
 
@@ -246,13 +300,18 @@ class MainApp(QMainWindow):
             return super().eventFilter(source, event)
         if event.type() == QEvent.Type.KeyPress and not event.isAutoRepeat():
             if event.key() == Qt.Key.Key_Delete:
+                diagnostics.action("Key Delete: delete %d selected mask(s) on %s",
+                                   len(self.image_display.highlighted_mask_ids),
+                                   self.state_manager.current_image_name)
                 self.image_display.delete_selected_masks()
                 self._schedule_results_refresh()
                 return True
             elif event.key() == Qt.Key.Key_Right:
+                diagnostics.action("Key Right: next image")
                 self.next_image()
                 return True
             elif event.key() == Qt.Key.Key_Left:
+                diagnostics.action("Key Left: previous image")
                 self.previous_image()
                 return True
             elif event.key() == Qt.Key.Key_H:
@@ -267,7 +326,22 @@ class MainApp(QMainWindow):
         return super().eventFilter(source, event)
 
     def closeEvent(self, event):
+        busy = []
+        if self.inference.running:
+            busy.append(f"Inference is running ({self.inference.manager.progress_text()}; "
+                        "masks found so far are kept).")
+        if self.training.running:
+            busy.append("A model is training (the best model so far is kept).")
+        if busy:
+            from ui.dialogs.confirm import ask_to_stop
+            if not ask_to_stop(self, "Close SegmentME?",
+                               "\n\n".join(busy) + "\n\nClosing stops it. Close anyway?",
+                               stop_label="Stop and Close", keep_label="Keep Working"):
+                event.ignore()
+                return
         self.inference.stop()
+        self.training.stop()
+        self.updater.stop()
         event.accept()
 
     # ---------- Scale (real-world units) ----------
@@ -335,9 +409,9 @@ class MainApp(QMainWindow):
         return um, scale.unit, scale.unit_um
 
     def save_results_csv(self):
-        """File > Save Results…: measurements of every mask as CSV."""
+        """File > Export Morphometrics…: measurements of every mask as CSV."""
         if not self.state_manager.mask_manager.count():
-            QMessageBox.information(self, "Save Results", "There are no masks to save yet.")
+            QMessageBox.information(self, "Export Morphometrics", "There are no masks to export yet.")
             return
         classes = self.state_manager.class_manager.get_all_class_names()
         dialog = SaveResultsDialog(self, self.project_scale, classes,
@@ -345,6 +419,6 @@ class MainApp(QMainWindow):
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         options = dialog.options()
-        logger.info("Save Results: %s", {k: v for k, v in options.items() if k != "image_names"}
+        logger.info("Export Morphometrics: %s", {k: v for k, v in options.items() if k != "image_names"}
                     | {"images": options["image_names"] or "all"})
         run_results_export(self, options)

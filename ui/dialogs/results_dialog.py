@@ -1,5 +1,5 @@
 """
-File > Save Results…: choose what to export, then write the measurement CSV
+File > Export Morphometrics…: choose what to export, then write the measurement CSV
 (core/measure/export.py) on a worker thread with a progress window.
 """
 import os
@@ -24,7 +24,7 @@ logger = get_logger(__name__)
 class SaveResultsDialog(QDialog):
     def __init__(self, main_window, scale: ProjectScale, classes, current_image_name):
         super().__init__(main_window)
-        self.setWindowTitle("Save Results")
+        self.setWindowTitle("Export Morphometrics")
         self._main = main_window
         self._current = current_image_name
 
@@ -74,6 +74,7 @@ class SaveResultsDialog(QDialog):
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save
                                    | QDialogButtonBox.StandardButton.Cancel)
+        buttons.button(QDialogButtonBox.StandardButton.Save).setText("Export")
         buttons.accepted.connect(self._ok)
         buttons.rejected.connect(self.reject)
         layout = QVBoxLayout(self)
@@ -83,7 +84,7 @@ class SaveResultsDialog(QDialog):
         self.setMinimumWidth(560)
 
     def _browse(self):
-        path, _ = QFileDialog.getSaveFileName(self, "Save measurements", self.path.text(), "CSV (*.csv)")
+        path, _ = QFileDialog.getSaveFileName(self, "Export morphometrics", self.path.text(), "CSV (*.csv)")
         if path:
             self.path.setText(path if path.lower().endswith(".csv") else path + ".csv")
 
@@ -93,11 +94,11 @@ class SaveResultsDialog(QDialog):
 
     def _ok(self):
         if not self._checked_classes():
-            QMessageBox.information(self, "Save Results", "Tick at least one class.")
+            QMessageBox.information(self, "Export Morphometrics", "Tick at least one class.")
             return
         folder = Path(self.path.text()).expanduser().parent
         if not folder.is_dir():
-            QMessageBox.warning(self, "Save Results", f"The folder {folder} does not exist.")
+            QMessageBox.warning(self, "Export Morphometrics", f"The folder {folder} does not exist.")
             return
         self.accept()
 
@@ -128,14 +129,14 @@ def run_results_export(main_window, options: dict):
     def label(done, total, stage):
         return f"{stage} ({done:,} of {total:,} masks)" if total else stage
 
-    run = run_in_background(main_window, "Save Results", work, label=label,
+    run = run_in_background(main_window, "Export Morphometrics", work, label=label,
                             cancel_exception=measure_export.ExportCancelled,
                             start_text="Starting…")
     if run.cancelled:
-        QMessageBox.information(main_window, "Save Results", "Cancelled; nothing was saved.")
+        QMessageBox.information(main_window, "Export Morphometrics", "Cancelled; nothing was exported.")
         return None
     if run.error is not None:
-        QMessageBox.critical(main_window, "Save Results", f"Could not save the results:\n{run.error}")
+        QMessageBox.critical(main_window, "Export Morphometrics", f"Could not export the morphometrics:\n{run.error}")
         return None
     result = run.result
     files = "\n".join(str(p) for p in result.files) or "(no masks matched)"
@@ -146,5 +147,5 @@ def run_results_export(main_window, options: dict):
     if result.skipped:
         text += f"\n\n{result.skipped} mask(s) without area were left out."
     logger.info("Saved measurements: %d rows to %s", result.rows, [str(p) for p in result.files])
-    QMessageBox.information(main_window, "Save Results", text)
+    QMessageBox.information(main_window, "Export Morphometrics", text)
     return result

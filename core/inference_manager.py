@@ -153,6 +153,13 @@ class InferenceManager(QObject):
         except (psutil.Error, OSError) as exc:
             logger.debug("Could not lower inference worker priority: %s", exc)
 
+    @property
+    def running(self) -> bool:
+        return self.process is not None
+
+    def progress_text(self) -> str:
+        return f"{self._processed} of {self._total} image(s) done"
+
     def stop_inference(self):
         """Kill the worker outright. Unlike the old thread.wait() approach,
         this never blocks the GUI thread waiting on an in-flight

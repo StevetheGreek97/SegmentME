@@ -537,6 +537,7 @@ class MaskResultsDock(QDockWidget):
         try:
             return self.parent.current_image_scale()
         except Exception:
+            logger.exception("Could not read the image's scale; the table shows pixels")
             return None, "px", 1.0
 
     # ------------------------------ Selection & filters -----------------------

@@ -5,7 +5,8 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, QSize
 from PyQt6.QtGui import QColor, QPalette
-from services.recent_projects import load_recent_projects, remove_recent_project, delete_project_and_remove_recent
+from services import recent_projects
+from services.recent_projects import load_recent_projects, remove_recent_project
 from ui.recent_item import RecentItemWidget
 from ui.dialogs.image_mode import ImageModeChoice
 from ui.dialogs.place_progress import enough_space, run_placement
@@ -402,7 +403,7 @@ class ProjectStartupDialog(QDialog):
     def _populate_recents(self):
         self.recent.clear()
 
-        db_paths = load_recent_projects()  # now auto-sanitizes
+        db_paths = load_recent_projects()  # includes projects not found right now
         if not db_paths:
             empty = QListWidgetItem("No recent projects found.")
             empty.setFlags(empty.flags() & ~Qt.ItemFlag.ItemIsSelectable)
@@ -423,7 +424,8 @@ class ProjectStartupDialog(QDialog):
                 db_path=db_path,
                 on_open=self._open_recent_by_path,
                 on_delete=self._delete_recent_by_path,
-                parent=self.recent
+                parent=self.recent,
+                missing=not os.path.exists(db_path),
             )
 
             self.recent.addItem(item)
@@ -432,26 +434,62 @@ class ProjectStartupDialog(QDialog):
 
     def _open_recent_by_path(self, db_path: str):
         if not os.path.exists(db_path):
-            QMessageBox.warning(self, "Missing Project", "This project no longer exists. It will be removed from the list.")
-            remove_recent_project(db_path)
-            self._populate_recents()
+            # Often a USB or network drive that is not connected: keep it listed
+            answer = QMessageBox.warning(
+                self, "Project Not Found",
+                f"The project was not found:\n{os.path.dirname(os.path.dirname(db_path))}\n\n"
+                "If it is on a drive that is not connected, connect it and try again.\n\n"
+                "Remove it from the list?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No)
+            if answer == QMessageBox.StandardButton.Yes:
+                remove_recent_project(db_path)
+                self._populate_recents()
             return
         self.selected_project_path = db_path
         self.is_new_project = False
         self.accept()
 
     def _delete_recent_by_path(self, db_path: str):
-        resp = QMessageBox.question(
-            self, "Delete Project?",
-            "This will permanently delete the project folder and remove it from the list.\nContinue?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-        )
-        if resp != QMessageBox.StandardButton.Yes:
+        root = recent_projects.project_root_to_delete(db_path)
+        if root is None:
+            # Not a normal project folder (or already gone): only the list entry goes.
+            recent_projects.delete_project(db_path)
+            QMessageBox.information(
+                self, "Removed from List",
+                "The project was removed from the list. No files were deleted.")
+            self._populate_recents()
+            return
+        bin_name = "Recycle Bin" if platform.system() == "Windows" else "Trash"
+        box = QMessageBox(QMessageBox.Icon.Warning, "Delete Project?",
+                          f"Delete the project '{root.name}'?", parent=self)
+        box.setInformativeText(
+            f"The whole project folder goes to the {bin_name}: its images, masks, trained "
+            f"models and exports.\n\n{root}\n\nOriginal images that were only linked are "
+            "not touched.")
+        delete = box.addButton("Move to " + bin_name, QMessageBox.ButtonRole.DestructiveRole)
+        keep = box.addButton(QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(keep)
+        box.setEscapeButton(keep)
+        box.exec()
+        if box.clickedButton() is not delete:
             return
 
-        ok = delete_project_and_remove_recent(db_path)
-        if not ok:
-            QMessageBox.critical(self, "Delete Failed", "Couldn’t delete the project folder. The recent entry was removed.")
+        result = recent_projects.delete_project(db_path)
+        if result == recent_projects.NO_TRASH:
+            answer = QMessageBox.warning(
+                self, "Delete Permanently?",
+                f"This drive has no {bin_name}, so '{root.name}' cannot be moved there.\n\n"
+                "Delete it permanently? This cannot be undone.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No)
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+            result = recent_projects.delete_project(db_path, permanently=True)
+        if result == recent_projects.FAILED:
+            QMessageBox.critical(self, "Delete Failed",
+                                 "The project folder could not be deleted (is a file in it "
+                                 "open in another program?).")
         self._populate_recents()
 
     def _open_recent_item(self, item: QListWidgetItem):

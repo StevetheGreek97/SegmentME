@@ -403,6 +403,7 @@ def _read_matched(entries: List[LabelEntry], class_names, progress) -> None:
         try:
             entry.size = _image_size(entry.image_path)
         except Exception as exc:  # e.g. the original of a linked image is gone
+            logger.warning("Import: %s can't be read: %r", entry.image_path, exc)
             entry.status = UNREADABLE
             entry.note = f"{entry.image_path.name} can't be read ({exc})"
             return

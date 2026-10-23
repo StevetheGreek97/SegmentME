@@ -1,4 +1,4 @@
-from PyQt6.QtWidgets import QMenuBar, QDialog, QVBoxLayout, QPushButton, QTextBrowser
+from PyQt6.QtWidgets import QMenuBar, QDialog, QMessageBox, QVBoxLayout, QPushButton, QTextBrowser
 from PyQt6.QtGui import QAction, QFont
 from ui.dialogs.model_manager_dialog import ModelManagerDialog
 
@@ -40,11 +40,11 @@ class MenuBar(QMenuBar):
 
         actions = [
             ("Import Images", self.parent.import_images),
-            ("Import Image Folder…", self.parent.import_image_folder),
             ("Import Annotations…", self.parent.import_annotations),
             ("Annotations", self.parent.show_results ), #self.parent.toggle_results_dock
-            ("Save Results…", self.parent.save_results_csv),
-            ("Export annotations", self.parent._export_results), 
+            ("Export Morphometrics…", self.parent.save_results_csv),
+            ("Export annotations", self.parent._export_results),
+            ("Restore Backup…", self.parent.restore_backup),
             ("Exit", self.parent.close),
         ]
 
@@ -106,6 +106,15 @@ class MenuBar(QMenuBar):
 
         self._add_actions_to_menu(settings_menu, actions)
 
+        self.auto_update_action = QAction("Check for Updates Automatically", self.parent)
+        self.auto_update_action.setCheckable(True)
+        self.auto_update_action.setChecked(self.parent.updater.auto_check)
+        self.auto_update_action.setToolTip("Once a day at start, ask GitHub whether a newer "
+                                           "SegmentME is out")
+        self.auto_update_action.toggled.connect(
+            lambda on: setattr(self.parent.updater, "auto_check", on))
+        settings_menu.addAction(self.auto_update_action)
+
     def show_models_dialog(self):
         """
         Manage model checkpoints and pick the model behind the SAM tool; if
@@ -137,8 +146,11 @@ class MenuBar(QMenuBar):
         help_menu = self.addMenu("Help")
 
         actions = [
-            ("Documentation", self.show_documentation),  # Placeholder for documentation
-            ("About", None),  # Placeholder for about dialog
+            ("Documentation", self.show_documentation),
+            ("Open Log Folder", self.open_log_folder),
+            ("Save Diagnostic Report…", self.save_diagnostic_report),
+            ("Check for Updates…", self.parent.updater.check_now),
+            ("About SegmentME", self.show_about),
         ]
 
         self._add_actions_to_menu(help_menu, actions)
@@ -159,6 +171,50 @@ class MenuBar(QMenuBar):
                 action.triggered.connect(callback)
             menu.addAction(action)
 
+
+    def open_log_folder(self):
+        """Help > Open Log Folder"""
+        from PyQt6.QtCore import QUrl
+        from PyQt6.QtGui import QDesktopServices
+        from services.logger import log_dir
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(log_dir())))
+
+    def save_diagnostic_report(self):
+        """Help > Save Diagnostic Report…: logs + system/project facts in one zip."""
+        from datetime import datetime
+        from pathlib import Path
+        from PyQt6.QtWidgets import QFileDialog
+        from ui import diagnostics
+        name = f"SegmentME-report-{datetime.now():%Y%m%d-%H%M}.zip"
+        path, _ = QFileDialog.getSaveFileName(self.parent, "Save Diagnostic Report",
+                                              str(Path.home() / name), "Zip (*.zip)")
+        if not path:
+            return None
+        try:
+            diagnostics.save_report(path, self.parent)
+        except Exception as exc:
+            logger.exception("Saving the diagnostic report failed")
+            QMessageBox.warning(self.parent, "Diagnostic Report",
+                                f"The report could not be saved:\n{exc}")
+            return None
+        QMessageBox.information(
+            self.parent, "Diagnostic Report",
+            f"Saved:\n{path}\n\nSend this file to the SegmentME developer. It holds the "
+            "app's log and facts about this computer and project, not your images or masks.")
+        return path
+
+    def show_about(self):
+        """Help > About SegmentME: version and build."""
+        from services import updates
+        from version import __version__
+        inst = self.parent.updater.installation
+        build = ("running from source" if inst.kind == updates.SOURCE
+                 else f"{inst.flavor.upper()} build, {inst.system} {inst.arch}")
+        QMessageBox.about(
+            self.parent, "About SegmentME",
+            f"<h3>SegmentME {__version__}</h3><p>{build}</p>"
+            f'<p><a href="https://github.com/{updates.REPOSITORY}">'
+            f"github.com/{updates.REPOSITORY}</a></p>")
 
     def show_documentation(self):
         """

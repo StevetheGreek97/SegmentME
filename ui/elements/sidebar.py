@@ -336,7 +336,8 @@ class Sidebar(QWidget):
         msg_box.setIcon(QMessageBox.Icon.Warning)
         msg_box.setWindowTitle("Confirm Deletion")
         msg_box.setText(f"Are you sure you want to delete the class '{class_name}'?")
-        msg_box.setInformativeText(f"This will also delete {count} mask(s) associated with this class.")
+        msg_box.setInformativeText(f"This will also delete {count} mask(s) associated with this class.\n\n"
+                                   "(A backup is made first: File > Restore Backup… brings them back.)")
         msg_box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
         msg_box.setDefaultButton(QMessageBox.StandardButton.No)
 
@@ -345,6 +346,8 @@ class Sidebar(QWidget):
             logger.debug("Class deletion cancelled by user")
             return
 
+        if count:
+            self.parent.backup_now("before deleting a class")   # File > Restore Backup… undoes it
         self.parent.state_manager.class_manager.remove_class(class_name)
         self.parent.state_manager.mask_manager.delete_masks_by_class(class_name)
         self.parent.state_manager.class_manager.reindex_classes()

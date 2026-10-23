@@ -104,10 +104,12 @@ class TrainingWorker(QObject):
                     if now - last_progress < self._PROGRESS_INTERVAL:
                         continue
                     last_progress = now
+                logger.debug("training: %s", line)   # also kept in the app's log file
                 self.log_signal.emit(line)
 
         tail = (buffer + decoder.decode(b"", final=True)).strip()
         if tail:
+            logger.debug("training: %s", tail)
             self.log_signal.emit(tail)
 
     def stop(self):

@@ -1,5 +1,5 @@
 """
-File > Save Results: one CSV row per mask with its measurements, in real
+File > Export Morphometrics: one CSV row per mask with its measurements, in real
 units where the image has a scale and in pixels always.
 
 Runs fine in a worker thread: it opens its own read-only connection to the
