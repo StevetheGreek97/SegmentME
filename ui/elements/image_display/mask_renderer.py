@@ -25,6 +25,7 @@ class MaskRenderer:
         self.picture = None            # the image with masks, as shown
         self._render_state = None      # what the picture was drawn from (for partial redraws)
         self.last_redraw = None        # "partial" / "full": for tests and the log
+        self._base, self._base_key, self._base_of = None, None, None
 
     @property
     def _app(self):
@@ -33,6 +34,36 @@ class MaskRenderer:
     def masks_shown(self) -> bool:
         """Masks are drawn (not hidden from the View menu, H not held)."""
         return self._view.masks_visible and not self._view._peeking
+
+    def style(self):
+        """The current DisplayStyle (Settings > Display…)."""
+        settings = getattr(self._view.parent, "display_settings", None)
+        return settings.style() if settings is not None else mask_render.DEFAULT_STYLE
+
+    def base(self, image, style=None):
+        """`image` as the view shows it without masks (Settings > Display…:
+        brightness, auto-contrast, sharpening...). Worked out once per image
+        and look, then reused by every redraw -- sharpening and auto-contrast
+        look at neighbouring pixels, so a patch can't be adjusted on its own.
+        The image itself when nothing is adjusted (no copy)."""
+        style = style or self.style()
+        if not style.adjusts_image:
+            return image
+        key = (id(image), style.image_key)
+        if self._base_key != key or self._base_of is not image:
+            self._base = style.adjust(image)
+            self._base_key, self._base_of = key, image
+        return self._base
+
+    def adopt_base(self, image, base, style):
+        """A base the worker thread already made (prepare_image)."""
+        if base is not None and style.adjusts_image:
+            self._base = base
+            self._base_key, self._base_of = (id(image), style.image_key), image
+
+    def plain(self, image):
+        """The image without masks, as shown (H, View > Show Masks off)."""
+        return self.base(image)
 
     def show(self, array):
         """Show this RGB array in the view (shared, not copied)."""
@@ -60,6 +91,8 @@ class MaskRenderer:
         image loads, but e.g. inference may have added masks meanwhile."""
         if prepared["visible"] != self.masks_shown():
             return False
+        if prepared.get("style", mask_render.DEFAULT_STYLE) != self.style():
+            return False
         if prepared["visible"] and prepared["colors"] != self.class_colors():
             return False
         count, top, total = self._app.mask_manager.fingerprint(self._app.current_image_name)
@@ -69,7 +102,7 @@ class MaskRenderer:
             logger.debug("Masks changed while the image loaded: drawing them again")
         return ok
 
-    def overlay(self, image, alpha=0.4, outline_thickness=1, exclude_ids=None, masks=None):
+    def overlay(self, image, alpha=None, outline_thickness=None, exclude_ids=None, masks=None):
         """
         Copy of `image` with the masks blended in (one colour per class) and outlined.
         exclude_ids: optional set of mask ids to leave unrendered (e.g. while brush-editing one).
@@ -79,13 +112,14 @@ class MaskRenderer:
         (it matters on large scans). The result is the same pixel for pixel.
         """
         if not self.masks_shown():
-            return image.copy()
+            return self.base(image).copy()
         if masks is None:
             masks = self._app.mask_manager.load_masks(
                 self._app.current_image_name
             )
         return mask_render.blend_masks(image, masks, self.class_colors(), alpha=alpha,
-                                       outline_thickness=outline_thickness, exclude_ids=exclude_ids)
+                                       outline_thickness=outline_thickness, exclude_ids=exclude_ids,
+                                       style=self.style(), base=self.base(image))
 
     def render_full(self, image, masks=None, picture=None):
         """Blend all masks into a copy of the image and show it.
@@ -107,8 +141,9 @@ class MaskRenderer:
         the outlines drawn (as a multiset: ids and row order don't matter)."""
         order, polys = [], Counter()
         seen = set()
+        style = self.style()
         for _id, mask, class_name, _ in masks:
-            if mask.shape[0] < 3:
+            if mask.shape[0] < 3 or class_name in style.hidden:
                 continue
             if class_name not in seen:
                 seen.add(class_name)
@@ -116,7 +151,7 @@ class MaskRenderer:
             polys[(class_name, mask.astype(np.int32).tobytes())] += 1
         cm = self._app.class_manager
         colors = tuple(cm.get_class_color(c).rgb() for c in order)
-        return {"image": image, "array": self.picture,
+        return {"image": image, "array": self.picture, "style": style,
                 "order": tuple(order), "colors": colors, "polys": polys}
 
     def _render_changes(self, image, masks) -> bool:
@@ -130,8 +165,11 @@ class MaskRenderer:
                 or old["image"] is not image or old["array"] is not self.picture):
             return False
         new = self._render_key(image, masks)
-        if new["order"] != old["order"] or new["colors"] != old["colors"]:
+        if (new["order"] != old["order"] or new["colors"] != old["colors"]
+                or new["style"] != old["style"]):
             return False
+        style = new["style"]
+        pad = style.outline_px            # thick outlines reach past their boxes
         changed = (old["polys"] - new["polys"]) + (new["polys"] - old["polys"])
         if not changed:
             self._render_state = new | {"array": self.picture}
@@ -140,7 +178,8 @@ class MaskRenderer:
         rects = []
         for (_cls, raw) in changed:
             x, y, w, h = cv2.boundingRect(np.frombuffer(raw, np.int32).reshape(-1, 2))
-            x0, y0, x1, y1 = max(x, 0), max(y, 0), min(x + w, W), min(y + h, H)
+            x0, y0 = max(x - pad, 0), max(y - pad, 0)
+            x1, y1 = min(x + w + pad, W), min(y + h + pad, H)
             if x1 > x0 and y1 > y0:
                 rects.append((x0, y0, x1, y1))
         area = sum((x1 - x0) * (y1 - y0) for x0, y0, x1, y1 in rects)
@@ -151,15 +190,16 @@ class MaskRenderer:
         order_index = {c: i for i, c in enumerate(new["order"])}
         polys, boxes = [], []
         for _id, mask, class_name, _ in masks:
-            if mask.shape[0] >= 3:
+            if mask.shape[0] >= 3 and class_name not in style.hidden:
                 poly = mask.astype(np.int32)
                 x, y, w, h = cv2.boundingRect(poly)
                 polys.append((order_index[class_name], class_name, poly))
-                boxes.append((x, y, x + w, y + h))
+                boxes.append((x - pad, y - pad, x + w + pad, y + h + pad))
         boxes = np.array(boxes, dtype=np.int64).reshape(-1, 4)
         out = self.picture
+        base = self.base(image, style)
         cm = self._app.class_manager
-        alpha = 0.4
+        alpha = style.alpha
 
         for rx0, ry0, rx1, ry1 in rects:
             hit = np.nonzero((boxes[:, 0] < rx1) & (boxes[:, 2] > rx0)
@@ -173,7 +213,7 @@ class MaskRenderer:
                 by0 = max(0, min(by0, int(boxes[hit, 1].min())))
                 bx1 = min(W, max(bx1, int(boxes[hit, 2].max())))
                 by1 = min(H, max(by1, int(boxes[hit, 3].max())))
-            buf = image[by0:by1, bx0:bx1].copy()
+            buf = base[by0:by1, bx0:bx1].copy()
             offset = np.array([bx0, by0], dtype=np.int32)
             by_class = {}
             for i in hit:
@@ -181,13 +221,16 @@ class MaskRenderer:
                 by_class.setdefault(k, (class_name, []))[1].append(poly - offset)
             for k in sorted(by_class):
                 class_name, cps = by_class[k]
-                mask = np.zeros(buf.shape[:2], dtype=np.uint8)
-                cv2.fillPoly(mask, cps, 255)
                 c = cm.get_class_color(class_name)
-                color = np.empty_like(buf)
-                color[:] = (int(c.red()), int(c.green()), int(c.blue()))
-                cv2.copyTo(cv2.addWeighted(buf, 1.0 - alpha, color, alpha, 0.0), mask, buf)
-                cv2.polylines(buf, cps, isClosed=True, color=(0, 0, 0), thickness=1)
+                rgb = (int(c.red()), int(c.green()), int(c.blue()))
+                if alpha > 0:
+                    mask = np.zeros(buf.shape[:2], dtype=np.uint8)
+                    cv2.fillPoly(mask, cps, 255)
+                    color = np.empty_like(buf)
+                    color[:] = rgb
+                    cv2.copyTo(cv2.addWeighted(buf, 1.0 - alpha, color, alpha, 0.0), mask, buf)
+                cv2.polylines(buf, cps, isClosed=True, color=style.outline_color(rgb),
+                              thickness=style.outline_px)
             out[ry0:ry1, rx0:rx1] = buf[ry0 - by0:ry1 - by0, rx0 - bx0:rx1 - bx0]
 
         self._patch_pixmap(out, rects)

@@ -119,6 +119,7 @@ class Sidebar(QWidget):
         row.addWidget(prev_button, 1)
         row.addWidget(next_button, 1)
         layout.addLayout(row)
+        self.prev_button, self.next_button = prev_button, next_button   # the tour points at them
 
     # ----------------------------------------------------------------------
     # Tools
@@ -206,6 +207,7 @@ class Sidebar(QWidget):
 
         row.addWidget(add_btn, 1)
         row.addWidget(remove_btn, 1)
+        self.add_class_button, self.remove_class_button = add_btn, remove_btn   # for the tour
 
         layout.addLayout(row)
 

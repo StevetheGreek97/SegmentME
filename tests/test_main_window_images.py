@@ -6,7 +6,7 @@ import os
 import pytest
 
 from services import image_files
-from tests.conftest import make_image
+from tests.conftest import make_image, wait_for_image
 
 pytest.importorskip("sam2", reason="the main window needs SAM2 installed")
 
@@ -442,6 +442,9 @@ def test_set_scale_by_typing_and_by_ruler(window, tmp_path, qapp, monkeypatch):
     import ui.dialogs.scale_dialog as sd
     from ui.elements.image_display.ruler_mode import RulerMode
     window.show()
+    # The image is read in the background: if it arrived after the ruler had
+    # started, showing it would cancel the ruler (a new image ends any edit)
+    wait_for_image(window)
     proj = tmp_path / "proj" / "proj.SEproj"
 
     # pixels per cm is offered too

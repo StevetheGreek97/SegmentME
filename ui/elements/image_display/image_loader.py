@@ -33,7 +33,7 @@ def read_rgb(image_path):
     return None if image is None else cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
 
-def prepare_image(image_path, db_path, colors, masks_shown):
+def prepare_image(image_path, db_path, colors, masks_shown, style=mask_render.DEFAULT_STYLE):
     """Worker thread: read the file and draw its masks into it -- all the
     heavy part of showing an image. Returns a dict, or None if unreadable.
     colors / masks_shown are taken on the GUI thread when the load starts."""
@@ -44,9 +44,13 @@ def prepare_image(image_path, db_path, colors, masks_shown):
     t1 = time.perf_counter()
     name = os.path.splitext(os.path.basename(image_path))[0]
     masks = mask_render.load_masks(db_path, name)
-    picture = mask_render.blend_masks(image, masks, colors) if masks_shown else None
+    # Brightness, auto-contrast, sharpening... (Settings > Display…): done here,
+    # off the GUI thread, and handed to the renderer with the picture
+    base = style.adjust(image) if style.adjusts_image else None
+    picture = (mask_render.blend_masks(image, masks, colors, style=style, base=base)
+               if masks_shown else None)
     return {"image": image, "masks": masks, "picture": picture, "colors": colors,
-            "visible": masks_shown, "read_s": t1 - t0, "draw_s": time.perf_counter() - t1}
+            "visible": masks_shown, "style": style, "base": base, "read_s": t1 - t0, "draw_s": time.perf_counter() - t1}
 
 
 class BackgroundImageReader:

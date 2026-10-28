@@ -20,6 +20,7 @@ own messages:
   the user can send.
 """
 import collections
+from functools import partial
 import faulthandler
 import json
 import os
@@ -348,7 +349,9 @@ class ActionRecorder:
         self.filter = _Filter()
 
     def observe(self, obj, event):
-        from PyQt6.QtCore import QEvent, Qt
+        from PyQt6.QtCore import QCoreApplication, QEvent, Qt
+        if QCoreApplication.closingDown():
+            return
         from PyQt6.QtWidgets import QAbstractButton, QDialog, QMenu, QMessageBox
         kind = event.type()
         if kind == QEvent.Type.MouseButtonRelease:
@@ -371,14 +374,23 @@ class ActionRecorder:
             if isinstance(obj, QMessageBox):
                 level = {QMessageBox.Icon.Critical: 40, QMessageBox.Icon.Warning: 30}.get(obj.icon(), 20)
                 text = " ".join(f"{obj.text()} {obj.informativeText()}".split())
-                actions_logger.log(level, "Message shown '%s': %s", obj.windowTitle(), text[:600])
-                BREADCRUMBS.append((time.time(), f"Message '{obj.windowTitle()}': {text[:120]}"))
+                # macOS message boxes have no title (Apple's guidelines; Qt drops it)
+                title = f" '{obj.windowTitle()}'" if obj.windowTitle() else ""
+                actions_logger.log(level, "Message shown%s: %s", title, text[:600])
+                BREADCRUMBS.append((time.time(), f"Message{title}: {text[:120]}"))
             else:
-                action("Opened window '%s' (%s)", obj.windowTitle(), type(obj).__name__)
-        elif kind == QEvent.Type.Hide and isinstance(obj, QDialog) and obj.isWindow() \
-                and not isinstance(obj, QMessageBox):
-            result = {QDialog.DialogCode.Accepted: "OK"}.get(obj.result(), "closed")
-            action("Closed window '%s' (%s)", obj.windowTitle(), result)
+                title = obj.windowTitle()
+                action("Opened window '%s' (%s)", title, type(obj).__name__)
+                # Closing is logged from the dialog's own `finished` signal, not
+                # from Hide events: a dialog is hidden once more while Qt
+                # destroys it, and touching it then made PyQt crash at exit.
+                if not obj.property("segmentme_logged"):
+                    obj.setProperty("segmentme_logged", True)
+                    obj.finished.connect(partial(_dialog_closed, title))
+
+
+def _dialog_closed(title, result):
+    action("Closed window '%s' (%s)", title, "OK" if result == 1 else "closed")
 
 
 # --------------------------------------------------------------------------
@@ -450,6 +462,8 @@ def start_session(app):
     app.installEventFilter(recorder.filter)
     _state["filter"] = recorder
     _state["watchdog"] = FreezeWatchdog().start()
+    # Stop watching before Qt starts destroying windows
+    app.aboutToQuit.connect(lambda: app.removeEventFilter(recorder.filter))
     app.aboutToQuit.connect(end_session)
     return recorder
 

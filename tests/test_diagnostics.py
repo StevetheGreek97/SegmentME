@@ -69,7 +69,9 @@ def test_clicks_menus_and_messages_are_recorded(qapp, captured):
     assert "Opened window 'Export Morphometrics'" in text
     assert "Clicked 'Export' in 'Export Morphometrics'" in text
     assert "Closed window 'Export Morphometrics' (OK)" in text
-    assert "WARNING segmentme.actions: Message shown 'Update': The disk is full." in text
+    assert "WARNING segmentme.actions: Message shown" in text and "The disk is full." in text
+    if sys.platform != "darwin":       # macOS message boxes have no title
+        assert "Message shown 'Update': The disk is full." in text
     assert "Clicked 'Export'" in diagnostics.recent_actions()
 
 
@@ -201,3 +203,41 @@ def test_native_crash_is_reported_on_the_next_start(tmp_path):
     assert "Native crash of the previous session" in log and "deep_inside_native_code" in log
     assert "System:" in log and "Session ended normally" in log
     assert not list(tmp_path.glob("crash-*.log")) and not list(tmp_path.glob("session-*.json"))
+
+
+def test_app_quits_without_crashing_with_everything_open(tmp_path):
+    """Logging's window watcher, the Display window, a tour and a tool all
+    active at exit. The watcher used to touch dialogs while Qt destroyed
+    them, and PyQt crashed while shutting down (most exits)."""
+    import json
+    from tests.conftest import make_image
+    root = tmp_path / "proj"
+    (root / ".segmentme").mkdir(parents=True)
+    make_image(root / "images" / "a.png", (300, 200))
+    (root / "proj.SEproj").write_text(json.dumps({"name": "proj", "images": ["a.png"]}))
+    body = f"""
+from PyQt6.QtCore import QTimer
+from PyQt6.QtGui import QColor
+import numpy as np
+from ui.main_window import MainApp
+from services.recent_projects import initialize_project
+from ui import tour
+w = MainApp(db_path={str(root / ".segmentme" / "masks.db")!r})
+w.state_manager.class_manager.add_class("Debris", QColor("#0000ff"))
+initialize_project(w, w.db_path)
+w.show()
+w.display_settings.set_sharpen(30)
+w.display_settings.set_class_visible("Debris", False)
+w.show_display_settings()
+w.sidebar.select_tool("manual_mask")
+overlay = tour.start_tour(w, "table")
+overlay.show_step(3)
+QTimer.singleShot(300, lambda: overlay.close_tour(False))
+QTimer.singleShot(600, w.close)
+QTimer.singleShot(800, app.quit)
+code = app.exec()
+sys.exit(code)
+"""
+    for attempt in range(3):
+        result = _run_session(tmp_path / f"logs{attempt}", body)
+        assert result.returncode == 0, result.stderr[-2000:]

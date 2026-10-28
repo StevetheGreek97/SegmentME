@@ -146,7 +146,7 @@ class ImageDisplay(QGraphicsView):
     def _start_load(self, image_path):
         # What the worker needs to draw the masks, taken here on the GUI thread
         self._pending_render = (self.parent.state_manager.db.db_path, self.renderer.class_colors(),
-                                self.renderer.masks_shown())
+                                self.renderer.masks_shown(), self.renderer.style())
         self._image_loader.start(image_path)
 
     def _prepare_image(self, image_path):
@@ -229,6 +229,7 @@ class ImageDisplay(QGraphicsView):
         masks, picture = None, None
         if prepared is not None and self.renderer.prepared_still_valid(prepared):
             masks, picture = prepared["masks"], prepared["picture"]
+            self.renderer.adopt_base(image, prepared.get("base"), prepared["style"])
 
         # Build polygon index for this image so highlights don't call load_masks every time
         self._rebuild_mask_index(masks)
@@ -288,7 +289,7 @@ class ImageDisplay(QGraphicsView):
     def last_redraw(self):
         return self.renderer.last_redraw
 
-    def overlay_base_masks(self, image, alpha=0.4, outline_thickness=1, exclude_ids=None, masks=None):
+    def overlay_base_masks(self, image, alpha=None, outline_thickness=None, exclude_ids=None, masks=None):
         """Copy of `image` with the masks drawn in (see MaskRenderer.overlay)."""
         return self.renderer.overlay(image, alpha, outline_thickness, exclude_ids, masks)
 
@@ -352,7 +353,7 @@ class ImageDisplay(QGraphicsView):
         if self.parent.state_manager.current_image is None:
             return
         if not self.masks_visible or self._peeking:
-            self._set_base_pixmap(self.parent.state_manager.current_image)
+            self._set_base_pixmap(self.renderer.plain(self.parent.state_manager.current_image))
         elif self.cached_image_with_masks is not None:
             self._set_base_pixmap(self.cached_image_with_masks)
 
@@ -744,9 +745,20 @@ class ImageDisplay(QGraphicsView):
             masks = self.parent.state_manager.mask_manager.load_masks(
                 self.parent.state_manager.current_image_name
             )
-        for mask_id, mask, *_ in masks:
-            if mask.shape[0] >= 3:
+        hidden = self.renderer.style().hidden      # masks of hidden classes can't be clicked
+        for mask_id, mask, class_name, *_ in masks:
+            if mask.shape[0] >= 3 and class_name not in hidden:
                 self._mask_index[str(mask_id)] = mask.astype(np.int32)
+
+    def restyle(self):
+        """Settings > Display… or V changed how masks look: draw again,
+        dropping masks of classes just hidden from the selection."""
+        if self.highlighted_mask_ids:
+            self._rebuild_mask_index()
+            keep = [m for m in self.highlighted_mask_ids if str(m) in self._mask_index]
+            if len(keep) != len(self.highlighted_mask_ids):
+                self.clear_selection()
+        self._masks_changed()
 
     def _set_base_pixmap(self, image_rgb):
         """Show this RGB array (shared with the view, not copied)."""

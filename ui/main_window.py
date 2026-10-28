@@ -4,14 +4,15 @@ from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QApplication, QVBoxLayout, QMessageBox, QDialog,
     QLineEdit, QAbstractSpinBox, QTextEdit, QPlainTextEdit, QComboBox, QDockWidget,
 )
-from PyQt6.QtCore import Qt, QEvent, pyqtSignal, QTimer
+from PyQt6.QtCore import Qt, QCoreApplication, QEvent, pyqtSignal, QTimer
 from PyQt6.QtGui import QIcon
 
 from core.managers.tool_manager import ToolManager
 from core.measure.scale import ProjectScale
 from core.state import StateManager
-from services import backups
+from services import backups, session_state
 from ui import diagnostics
+from ui.tour import tour_running
 from services.file_handlers import get_resource_path
 from services.logger import get_logger, log_memory_usage
 from ui.dialogs.class_colors_dialog import ClassColorsDialog
@@ -49,6 +50,11 @@ class MainApp(QMainWindow):
         self.inference = InferenceRun(self)     # Run Inference (ui/flows/runs.py)
         self.training = TrainingRun(self)       # Train Custom Model
         self.updater = Updater(self)            # new versions (ui/dialogs/update_dialog.py)
+        self.tour = None                        # guided tour on screen (ui/tour.py)
+
+        # How masks and the image look (Settings > Display…); read by the renderer
+        from ui.display_settings import DisplaySettings
+        self.display_settings = DisplaySettings(self)
 
         # UI widgets
         self.image_display = ImageDisplay(self)
@@ -92,6 +98,13 @@ class MainApp(QMainWindow):
 
         # Global key handling
         QApplication.instance().installEventFilter(self)
+
+        # Remember the image, tool and class for the next time the project opens
+        self._setup_place_memory()
+
+        # Display settings: redraw on change, "Hidden: …" note, (V key below)
+        from ui import display_settings
+        display_settings.connect_window(self, self.display_settings)
 
         # The quiet daily update check, once the window is up (packaged app only)
         QTimer.singleShot(5000, self.updater.check_on_start)
@@ -150,6 +163,77 @@ class MainApp(QMainWindow):
                          len(self.state_manager.image_paths))
         else:
             logger.debug("Already at the first image")
+
+    # ---------- Reopen where you left off (services/session_state.py) ----------
+    def _setup_place_memory(self):
+        self._place_ready = False        # nothing is saved before the last place is restored
+        self._place_timer = QTimer(self)
+        self._place_timer.setSingleShot(True)
+        self._place_timer.setInterval(1000)
+        self._place_timer.timeout.connect(self.remember_place)
+        # Bound methods, not lambdas: PyQt drops these connections when the
+        # window is destroyed (a lambda kept firing into a half-deleted window)
+        self.state_manager.image_changed.connect(self._place_changed)
+        self.sidebar.class_dropdown.currentTextChanged.connect(self._place_changed)
+        for button in self.sidebar._tool_buttons.values():
+            button.toggled.connect(self._place_changed)
+
+    def _place_changed(self, *_args):
+        if getattr(self, "_place_ready", False):
+            self._place_timer.start()    # one write per burst of changes
+
+    def current_place(self) -> dict:
+        state = self.state_manager
+        tool = next((name for name, b in self.sidebar._tool_buttons.items() if b.isChecked()), None)
+        path = state.current_image_path
+        return {"image": os.path.basename(path) if path else None,
+                "tool": tool,
+                "class": self.sidebar.class_dropdown.currentText() or None}
+
+    def remember_place(self):
+        root = getattr(self, "project_root", None) or self.state_manager.project_root
+        if not root or not self._place_ready:
+            return False
+        self._place_timer.stop()
+        return session_state.save(root, self.current_place())
+
+    def restore_place(self, place):
+        """The class right away; the tool once the window is up (SAM and
+        DEXTR load a model). A tool whose model is not installed is skipped
+        rather than greeting the user with a download question."""
+        name = place.get("class")
+        if name and self.sidebar.class_dropdown.findText(name) >= 0:
+            self.sidebar.class_dropdown.setCurrentText(name)
+        tool = place.get("tool")
+        if tool in self.sidebar._tool_buttons and self._tool_model_installed(tool):
+            # A timer owned by the window: it dies with it, so it never fires
+            # into a window that was closed and deleted meanwhile
+            self._restore_tool_name = tool
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(self._restore_tool)
+            timer.start(300)
+            self._restore_tool_timer = timer
+        self._place_ready = True
+
+    def _restore_tool(self):
+        tool = self._restore_tool_name
+        if self.tool_manager.current_tool is None:          # the user picked nothing meanwhile
+            logger.info("Reopening with tool %s", tool)
+            self.sidebar.select_tool(tool)
+
+    @staticmethod
+    def _tool_model_installed(tool) -> bool:
+        from core.tools import sam_registry
+        from services import model_store
+        try:
+            if tool == "sam":
+                return model_store.is_available(sam_registry.get_selected_variant())
+            if tool == "dextr":
+                return model_store.is_available(model_store.MODELS["dextr"])
+        except Exception:
+            return False
+        return True
 
     # ---------- Backups (services/backups.py) ----------
     def _note_change(self):
@@ -280,6 +364,23 @@ class MainApp(QMainWindow):
     _TOOL_BY_KEY = {getattr(Qt.Key, f"Key_{k}"): name for name, k in TOOL_KEYS.items()}
     _TOOL_BY_KEY[getattr(Qt.Key, f"Key_{NO_TOOL_KEY}")] = None
 
+    def show_display_settings(self):
+        """Settings > Display… (one window, kept open beside the image)."""
+        from ui.display_settings import DisplayDialog
+        dialog = getattr(self, "_display_dialog", None)
+        if dialog is None:
+            dialog = DisplayDialog(self)
+            self._display_dialog = dialog
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+        return dialog
+
+    @staticmethod
+    def _plain_key(event) -> bool:
+        """No Ctrl / Alt / Shift held (Ctrl+V etc. stay free)."""
+        return not (event.modifiers() & ~Qt.KeyboardModifier.KeypadModifier)
+
     def _tool_key(self, event) -> bool:
         """Plain P / I / A / D / Q switch the tool (Ctrl+letter etc. stay free).
         Not while a split / brush edit is open: those use the keyboard."""
@@ -294,6 +395,10 @@ class MainApp(QMainWindow):
         return True
 
     def eventFilter(self, source, event):
+        if QCoreApplication.closingDown():
+            return False                  # objects are being destroyed: don't touch them
+        if event.type() in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease) and tour_running(self):
+            return super().eventFilter(source, event)   # the tour gets the keys (→ ← Esc)
         if event.type() in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease) and not self._shortcut_target(source):
             if event.type() == QEvent.Type.KeyRelease and event.key() == Qt.Key.Key_H:
                 self.image_display.set_peeking(False)   # never leave masks hidden
@@ -317,6 +422,11 @@ class MainApp(QMainWindow):
             elif event.key() == Qt.Key.Key_H:
                 self.image_display.set_peeking(True)
                 return True
+            elif event.key() == Qt.Key.Key_V and self._plain_key(event):
+                diagnostics.action("Key V: outlines only %s",
+                                   "off" if self.display_settings.outlines_only else "on")
+                self.display_settings.toggle_outlines_only()
+                return True
             elif self._tool_key(event):
                 return True
         elif event.type() == QEvent.Type.KeyRelease and not event.isAutoRepeat():
@@ -339,9 +449,13 @@ class MainApp(QMainWindow):
                                stop_label="Stop and Close", keep_label="Keep Working"):
                 event.ignore()
                 return
+        self.remember_place()
         self.inference.stop()
         self.training.stop()
         self.updater.stop()
+        # Stop watching the whole app's keys: a closed window must not get
+        # events of other objects (or of its own children while Qt deletes them)
+        QApplication.instance().removeEventFilter(self)
         event.accept()
 
     # ---------- Scale (real-world units) ----------

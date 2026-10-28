@@ -131,3 +131,45 @@ def test_full_redraw_when_needed(busy):
     d.set_masks_visible(True)
     check(win, "full")                              # back from hidden: full once
     check(win, "partial")
+
+
+@pytest.mark.parametrize("style", [
+    dict(outlines=True), dict(fill=0), dict(fill=85, brightness=40, contrast=30),
+    dict(outlines=True, hidden={"b"}, brightness=-30),
+    dict(auto_contrast=True, sharpen=60),               # look at neighbouring pixels
+    dict(gamma=180, saturation=-60, invert=True),
+    dict(channel="blue", auto_contrast=True, outlines=True),
+])
+def test_partial_redraw_matches_full_redraw_with_display_settings(busy, style):
+    """Settings > Display… (opacity, outlines only, hidden classes, brightness,
+    contrast): the fast redraw after an edit still equals a full redraw."""
+    win, rng = busy
+    s = win.image_display.parent.display_settings
+    s.set_outlines_only(style.get("outlines", False))
+    s.set_fill(style.get("fill", 40))
+    s.set_brightness(style.get("brightness", 0))
+    s.set_contrast(style.get("contrast", 0))
+    for name in style.get("hidden", ()):
+        s.set_class_visible(name, False)
+    s.set_gamma(style.get("gamma", 100))
+    s.set_saturation(style.get("saturation", 0))
+    s.set_sharpen(style.get("sharpen", 0))
+    s.set_auto_contrast(style.get("auto_contrast", False))
+    s.set_invert(style.get("invert", False))
+    s.set_channel(style.get("channel", "all"))
+    win.image_display.refresh_masks()                  # full redraw in the new style
+    db = win.state_manager.db
+    ids = lambda: [r[0] for r in db.fetch_all("SELECT id FROM masks ORDER BY id")]
+    for step in range(25):
+        op = step % 3
+        if op == 0:
+            db.execute_query("INSERT INTO masks (image_name, mask_data, class_name, surface_area) "
+                             "VALUES ('scan', ?, ?, 0)",
+                             (random_polygon(rng).tobytes(), rng.choice(["a", "b", "c"])))
+        elif op == 1:
+            db.execute_query("DELETE FROM masks WHERE id = ?", (int(rng.choice(ids())),))
+        else:
+            db.execute_query("UPDATE masks SET class_name = ? WHERE id = ?",
+                             (rng.choice(["a", "b", "c"]), int(rng.choice(ids()))))
+        check(win)
+    s.reset()

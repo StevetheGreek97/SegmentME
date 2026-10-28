@@ -12,6 +12,7 @@ import json, os, platform, shutil, datetime
 from typing import List
 
 from services.logger import get_logger
+from services import session_state
 
 logger = get_logger(__name__)
 
@@ -267,6 +268,13 @@ def initialize_project(main_window, db_path):
         main_window.project_root = project_root
         main_window.config = config
         main_window.state_manager.set_image_paths(image_paths)
+        # Back to the image the user was on last time (services/session_state.py)
+        place = session_state.load(project_root)
+        names = [os.path.basename(p) for p in image_paths]
+        if place.get("image") in names:
+            main_window.state_manager.image_index = names.index(place["image"])
+            logger.info("Reopening at image %s (%d of %d)", place["image"],
+                        main_window.state_manager.image_index + 1, len(names))
         main_window.slider.set_image_count(len(image_paths))
         # read on a worker thread: a scan on a cloud drive can take seconds
         main_window.image_display.show_image(main_window.state_manager.current_image_path)
@@ -275,3 +283,9 @@ def initialize_project(main_window, db_path):
         # Sync classes from DB into .SEproj on every open
         rows = main_window.state_manager.class_manager.list_classes()
         seproj_update_classes(project_root, [{"name": r[1], "color": r[2]} for r in rows])
+
+        # ... and to the tool and class used last time
+        if hasattr(main_window, "restore_place"):
+            main_window.restore_place(place)
+    elif hasattr(main_window, "restore_place"):
+        main_window.restore_place({})     # no images yet: start remembering from here

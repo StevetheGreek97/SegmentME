@@ -68,6 +68,8 @@ app.processEvents()
 from ui.dialogs.project_dialog import ProjectStartupDialog
 from services.recent_projects import save_recent_project, initialize_project
 from ui.project_lock import lock_project
+from ui.tour import offer_first_tour
+from PyQt6.QtCore import QTimer
 from services.logger import get_logger
 app.processEvents()
 
@@ -90,6 +92,7 @@ if len(sys.argv) > 1 and sys.argv[1].lower().endswith(".seproj"):
         diagnostics.log_project_opened(window)
         splash.finish(window)
         window.show()
+        QTimer.singleShot(1200, lambda: offer_first_tour(window))   # once ever (ui/tour.py)
         sys.exit(app.exec())
     else:
         splash.close()
@@ -111,6 +114,7 @@ else:
         initialize_project(window, dialog.selected_project_path)
         diagnostics.log_project_opened(window)
         window.show()
+        QTimer.singleShot(1200, lambda: offer_first_tour(window))   # once ever (ui/tour.py)
         sys.exit(app.exec())
     else:
         sys.exit(0)

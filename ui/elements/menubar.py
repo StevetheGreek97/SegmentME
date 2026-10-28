@@ -101,6 +101,7 @@ class MenuBar(QMenuBar):
         settings_menu = self.addMenu("Settings")
 
         actions = [
+            ("Display…", self.parent.show_display_settings),
             ("Models...", self.show_models_dialog),
         ]
 
@@ -154,6 +155,16 @@ class MenuBar(QMenuBar):
         ]
 
         self._add_actions_to_menu(help_menu, actions)
+
+        # Help > Tours: guided tours of the window (ui/tour.py)
+        from ui import tour
+        tours_menu = help_menu.addMenu("Tours")
+        help_menu.insertMenu(help_menu.actions()[0], tours_menu)
+        for key, (name, steps) in tour.TOURS.items():
+            act = QAction(f"{name} ({len(steps)} steps)", self.parent)
+            act.triggered.connect(lambda _checked=False, k=key: tour.start_tour(self.parent, k))
+            tours_menu.addAction(act)
+        self.tours_menu = tours_menu
 
     def _add_actions_to_menu(self, menu, actions):
         """
