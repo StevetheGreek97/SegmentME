@@ -108,6 +108,24 @@ def _lut(brightness, contrast, gamma=100):
     return np.clip(np.round(y), 0, 255).astype(np.uint8)
 
 
+@lru_cache(maxsize=256)
+def _blend_lut(rgb, alpha):
+    x = np.arange(256, dtype=np.float64)[:, None]
+    y = x * (1.0 - alpha) + np.asarray(rgb, dtype=np.float64) * alpha
+    return np.clip(np.rint(y), 0, 255).astype(np.uint8).reshape(1, 256, 3)
+
+
+def blend_color(image, rgb, alpha):
+    """image (H x W x 3 uint8) mixed with one colour: image*(1-alpha) + rgb*alpha.
+
+    A lookup table, not cv2.addWeighted: on ARM (Apple Silicon) addWeighted
+    rounds SIMD-handled pixels and row-end pixels differently, so the same
+    pixel came out 1 apart depending on the width of the box being blended,
+    and the fast partial redraw no longer matched a full one. A table gives
+    every pixel value the same result wherever it is."""
+    return cv2.LUT(image, _blend_lut(tuple(int(v) for v in rgb), float(alpha)))
+
+
 DEFAULT_IMAGE_KEY = (0, 0, 100, 0, False, 0, False, "all")
 DEFAULT_STYLE = DisplayStyle()
 
@@ -158,10 +176,7 @@ def blend_masks(image, masks, colors, alpha=None, outline_thickness=None, exclud
             if not cv2.countNonZero(roi_mask):
                 continue  # already blended through an overlapping box
             roi_out = output[y0:y1, x0:x1]
-            roi_color = np.empty_like(roi_out)
-            roi_color[:] = color_rgb
-            blended = cv2.addWeighted(roi_out, 1.0 - alpha, roi_color, alpha, 0.0)
-            cv2.copyTo(blended, roi_mask, roi_out)
+            cv2.copyTo(blend_color(roi_out, color_rgb, alpha), roi_mask, roi_out)
             # Clear the box: pixels shared with an overlapping polygon of
             # this class must be blended once, as with one class-wide mask.
             roi_mask[:] = 0

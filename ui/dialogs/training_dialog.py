@@ -244,6 +244,18 @@ class _CardGrid(QWidget):
             self._grid.setColumnStretch(c, 1 if c < columns else 0)
         self._grid.setRowStretch(row + 1, 1)
 
+    def minimumSizeHint(self):
+        # Never ask for the two-column width: inside the scroll area that
+        # would keep the grid wider than the page, so it never got narrow
+        # enough to switch to one column (seen on Windows, whose wider
+        # fonts make two cards side by side wider than TWO_COLUMNS_FROM).
+        hint = super().minimumSizeHint()
+        if self._columns == 2:
+            m = self._grid.contentsMargins()
+            card = max((c.minimumSizeHint().width() for c, _ in self._cards), default=0)
+            hint.setWidth(card + m.left() + m.right())
+        return hint
+
     def resizeEvent(self, event):
         columns = 2 if event.size().width() >= TWO_COLUMNS_FROM else 1
         if columns != self._columns:

@@ -18,3 +18,5 @@ build_cache/
 vendor/
 docker_projects
 *.pyc
+# Claude Code local settings
+.claude/

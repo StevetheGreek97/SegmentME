@@ -226,9 +226,7 @@ class MaskRenderer:
                 if alpha > 0:
                     mask = np.zeros(buf.shape[:2], dtype=np.uint8)
                     cv2.fillPoly(mask, cps, 255)
-                    color = np.empty_like(buf)
-                    color[:] = rgb
-                    cv2.copyTo(cv2.addWeighted(buf, 1.0 - alpha, color, alpha, 0.0), mask, buf)
+                    cv2.copyTo(mask_render.blend_color(buf, rgb, alpha), mask, buf)
                 cv2.polylines(buf, cps, isClosed=True, color=style.outline_color(rgb),
                               thickness=style.outline_px)
             out[ry0:ry1, rx0:rx1] = buf[ry0 - by0:ry1 - by0, rx0 - bx0:rx1 - bx0]

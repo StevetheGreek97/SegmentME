@@ -6,6 +6,7 @@ score, how a run ends).
 import json
 import os
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -363,6 +364,31 @@ def test_cards_use_two_columns_when_wide(dialog, qapp):
     assert len(widths) == 1                                  # every number box the same width
 
 
+def test_cards_go_to_one_column_with_large_fonts(window, qapp):
+    """With wide fonts (Windows) two cards side by side are wider than the
+    two-column threshold; the grid must still drop to one column instead of
+    staying wide behind a horizontal scrollbar."""
+    from ui.dialogs.training_dialog import TrainingDialog
+    old = qapp.font()
+    big = qapp.font()
+    big.setPointSize(16)
+    qapp.setFont(big)
+    try:
+        d = TrainingDialog(window)
+        grid = d.training_tab.widget()
+        d.resize(1400, 700)
+        d.show()
+        qapp.processEvents()
+        assert grid._columns == 2
+        d.resize(600, 700)
+        qapp.processEvents()
+        assert grid._columns == 1
+        d.close()
+        d.deleteLater()
+    finally:
+        qapp.setFont(old)
+
+
 def test_input_boxes_hold_only_the_value(dialog):
     from PyQt6.QtWidgets import QDoubleSpinBox, QSpinBox
     for box in dialog.findChildren((QSpinBox, QDoubleSpinBox)):
@@ -462,7 +488,7 @@ def test_monitor_finished_offers_close_and_the_folder(monitor, monkeypatch):
     opened = []
     monkeypatch.setattr(QDesktopServices, "openUrl", lambda url: opened.append(url.toLocalFile()))
     m.open_btn.click()
-    assert opened == [str(out)]
+    assert [Path(p) for p in opened] == [out]      # QUrl gives "/" even on Windows
     assert not m.timer.isActive()
 
 
