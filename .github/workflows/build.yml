@@ -161,7 +161,9 @@ jobs:
   macos-arm64:
     name: macOS (Apple Silicon)
     needs: check-version
-    runs-on: macos-14
+    # macos-14 was retired by GitHub (Nov 2026: "configuration
+    # 'macos-14-arm64-us-default' is not supported"); macos-15 is arm64 too.
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
