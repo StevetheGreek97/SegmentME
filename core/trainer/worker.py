@@ -34,6 +34,7 @@ class TrainingWorker(QObject):
         self.settings = settings
         self.process = None
         self._stopping = False
+        self.outcome = None      # "finished", "stopped" or "failed" once run() is done
 
     def run(self):
         try:
@@ -58,11 +59,17 @@ class TrainingWorker(QObject):
             self._pump_output()
             code = self.process.wait()
             logger.info("Training subprocess exited with code %s", code)
-            if code != 0 and not self._stopping:
+            if self._stopping:
+                self.outcome = "stopped"
+            elif code != 0:
+                self.outcome = "failed"
                 self.log_signal.emit(f"❌ Training process exited with code {code}; see the log above.")
+            else:
+                self.outcome = "finished"
 
         except Exception as e:
             logger.exception("Training subprocess failed")
+            self.outcome = "stopped" if self._stopping else "failed"
             self.log_signal.emit(f"❌ Error: {e}")
 
         finally:

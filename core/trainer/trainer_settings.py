@@ -18,6 +18,7 @@ class TrainingSettings:
     lr0: float = 0.01
     lrf: float = 0.01
     momentum: float = 0.937
+    cls_pw: float = 0.0      # class balance: inverse-frequency class weights ** cls_pw (ultralytics >= 8.4)
     # Augmentation parameters
     weight_decay: float = 0.0005
     hsv_h: float = 0.015

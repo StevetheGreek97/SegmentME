@@ -1,6 +1,32 @@
 import torch
 import platform
+from dataclasses import dataclass
+
 from PyQt6.QtWidgets import QMessageBox
+
+
+@dataclass(frozen=True)
+class TrainingDevice:
+    """Where training runs, and how to say so in one line."""
+    device: object        # what ultralytics takes: 0, [0, 1], "mps" or "cpu"
+    label: str            # e.g. "NVIDIA GeForce RTX 3060 (12 GB)"
+    fast: bool            # a GPU; False: the CPU (much slower)
+
+
+def describe_device() -> TrainingDevice:
+    """The best device for training, without showing anything (CUDA GPU,
+    then Apple Silicon, then the CPU)."""
+    if torch.cuda.is_available():
+        count = torch.cuda.device_count()
+        props = torch.cuda.get_device_properties(0)
+        label = f"{torch.cuda.get_device_name(0)} ({props.total_memory / 1024 ** 3:.0f} GB)"
+        if count > 1:
+            label += f" + {count - 1} more GPU{'s' if count > 2 else ''}"
+        return TrainingDevice(list(range(count)) if count > 1 else 0, label, True)
+    if platform.system() == "Darwin" and torch.backends.mps.is_available():
+        return TrainingDevice("mps", "Apple Silicon GPU", True)
+    return TrainingDevice("cpu", "CPU (no graphics card found)", False)
+
 
 def auto_detect_device(parent=None):
     """

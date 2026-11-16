@@ -44,6 +44,27 @@ class MaskDatabaseManager:
                      image_name, class_name, len(mask), surface_area)
         self.parent.masks_updated.emit()
 
+    def save_masks(self, masks, image_name, class_name="Object") -> int:
+        """Save several masks of one class at once: one transaction (all or
+        none) and one refresh. Masks with fewer than 3 points are skipped.
+        Returns how many were saved."""
+        rows = []
+        for mask in masks:
+            mask = np.asarray(mask, dtype=np.float32).reshape(-1, 2)
+            if len(mask) < 3:
+                continue
+            rows.append((image_name, mask.tobytes(), class_name,
+                         cv2.contourArea(mask.astype(np.int32))))
+        if not rows:
+            return 0
+        with self.db.transaction():
+            self.db.executemany(
+                "INSERT INTO masks (image_name, mask_data, class_name, surface_area) VALUES (?, ?, ?, ?)",
+                rows)
+        logger.info("Saved %d mask(s) on %s as class %r", len(rows), image_name, class_name)
+        self.parent.masks_updated.emit()
+        return len(rows)
+
     def load_masks(self, image_name):
         """
         Load all masks for a given image.

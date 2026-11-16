@@ -57,6 +57,7 @@ SegmentME provides three segmentation methods:
 - Press **E** to execute AI-based segmentation and generate the mask.
 - Review the generated mask—if necessary, refine foreground and background selections and rerun segmentation.
 - Press **S** to save the final mask for further processing.
+- **Find every object in an area (F):** hold **Ctrl** and drag a box around the area, optionally left-click a few objects (green points: always included) and right-click things you don't want (red points: the dish, a label, background), then press **F**. SAM outlines every object it finds inside the box; objects already saved on the image are not found again. Right-click a result to leave it out, then press **S** to save them all with the selected class. **F** needs a box: without one, the status bar asks you to draw it first. A big box is looked at in one go when your objects are big enough for that (a few seconds); on large scans of small animals SegmentME looks piece by piece instead, using the size of the masks already saved in the project to decide (about two minutes for a 7600 x 11800 scan on a normal PC with SAM2). The status bar shows how far it is, and switching image or tool stops it.
 - Toggling the SAM button off unloads the model and frees its memory; toggling it back on reloads the model (this can take a moment, especially for SAM3).
 
 ---

@@ -34,3 +34,23 @@ class ViewToolHost:
 
     def save_mask(self, polygon, image_name, class_name):
         self._window.state_manager.mask_manager.save_mask(polygon, image_name, class_name)
+
+    def save_masks(self, polygons, image_name, class_name):
+        """Several masks at once (one transaction, one redraw)."""
+        return self._window.state_manager.mask_manager.save_masks(polygons, image_name, class_name)
+
+    def typical_object_sizes(self, limit=2000):
+        """Sizes (sqrt of the area, image pixels) of the most recent masks in
+        the project: how big the objects are, for SAM's find-all (F)."""
+        rows = self._window.state_manager.db.fetch_all(
+            "SELECT surface_area FROM masks WHERE surface_area > 0 ORDER BY id DESC LIMIT ?",
+            (int(limit),))
+        return [float(area) ** 0.5 for (area,) in rows]
+
+    def existing_polygons(self):
+        """Outlines already saved on the image on screen."""
+        name = self.image_name()
+        if not name:
+            return []
+        return [mask for _id, mask, _cls, _area in
+                self._window.state_manager.mask_manager.load_masks(name)]

@@ -272,6 +272,25 @@ def installed_yolo_models() -> list:
     return found
 
 
+def yolo_task(path):
+    """What a YOLO .pt was trained for ("segment", "detect", "classify", …),
+    or None when the file does not say or cannot be read."""
+    try:
+        import torch
+        ckpt = torch.load(str(path), map_location="cpu", weights_only=False)
+    except Exception:
+        from services.logger import get_logger
+        get_logger(__name__).warning("Could not read the model %s to find its task", path,
+                                     exc_info=True)
+        return None
+    if not isinstance(ckpt, dict):
+        return None
+    task = (ckpt.get("train_args") or {}).get("task")
+    if not task and ckpt.get("model") is not None:
+        task = getattr(ckpt["model"], "task", None)
+    return task or None
+
+
 def trained_models(project_root_dir) -> list:
     """best.pt of every training run inside a project (newest first)."""
     if not project_root_dir:

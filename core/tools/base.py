@@ -9,6 +9,8 @@ A tool (manual polygon, Intelligent Scissors, SAM, DEXTR) only knows its
     host.image_name()           its name in the database (file name without extension)
     host.choose_class()         the class to save as, or None (the host tells the user why)
     host.save_mask(polygon, image_name, class_name)
+    host.save_masks(polygons, image_name, class_name)   (optional: many at once)
+    host.existing_polygons()    (optional: outlines already saved on the image)
 
 and the image view only calls the methods below (left_click, right_click,
 mouse_move, left_release, image_changed, complete_mask, clear_temp_items).
@@ -32,6 +34,7 @@ class MaskTool(QObject):
 
     label = "mask"                # shown in messages and the log, e.g. "SAM"
     segments_on_e = False         # E runs a model (compute_polygon on a worker thread)
+    finds_all = False             # F finds every object in a box (find_all_job / compute_all / apply_all)
 
     def __init__(self, host):
         super().__init__()

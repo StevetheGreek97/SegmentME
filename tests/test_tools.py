@@ -327,9 +327,91 @@ def test_app_works_without_the_dextr_package(win, qapp, monkeypatch, no_popups):
     monkeypatch.setitem(sys.modules, "DEXTR", None)                 # "not installed"
     monkeypatch.delitem(sys.modules, "core.tools.dextr_mask", raising=False)
     monkeypatch.setattr(tm, "ensure_model_available", lambda *a, **k: True)
-    assert win.tool_manager.enable_tool("dextr") is False
+    win.sidebar.select_tool("dextr")                                # loads in the background
+    _wait_until(qapp, lambda: win.tool_manager.loading() is None)
+    assert win.tool_manager.current_tool is None and not win.sidebar.dextr.isChecked()
     assert any("could not be started" in p[2] for p in no_popups)
     assert win.tool_manager.enable_tool("manual_mask")              # other tools still work
+
+
+# ------------------------------------------------------------------ models load in the background
+def _wait_until(qapp, cond, timeout=10):
+    import time
+    end = time.time() + timeout
+    while time.time() < end and not cond():
+        qapp.processEvents()
+        time.sleep(0.01)
+    return cond()
+
+
+@pytest.fixture
+def slow_sam(monkeypatch):
+    """SAM's model "loads" for a while on the worker thread; returns the
+    event that lets it finish."""
+    import threading
+    import core.managers.tool_manager as tm
+    release = threading.Event()
+    loads = []
+
+    class Predictor:
+        def set_image(self, image):
+            pass
+
+    def load(device, spec):
+        loads.append(threading.current_thread().name)
+        release.wait(10)
+        return Predictor()
+    monkeypatch.setattr(tm, "ensure_model_available", lambda *a, **k: True)
+    monkeypatch.setattr(tm, "load_predictor", load)
+    monkeypatch.setattr(tm.sam_registry, "get_selected_variant",
+                        lambda: tm.sam_registry.SAM_VARIANTS["sam2_tiny"])
+    release.loads = loads
+    yield release
+    release.set()
+
+
+def test_sam_loads_without_freezing_the_window(win, qapp, slow_sam):
+    import time
+    from core.tools.sam2_masker import SamMasker2
+    t = time.perf_counter()
+    win.sidebar.select_tool("sam")
+    assert time.perf_counter() - t < 0.5                            # returned at once
+    assert win.sidebar.sam.isChecked() and win.tool_manager.loading() == "sam"
+    assert win.tool_manager.current_tool is None
+    assert "Loading" in win.statusBar().currentMessage()
+    _wait_until(qapp, lambda: bool(slow_sam.loads))
+    assert slow_sam.loads[0] != "MainThread"                        # on a worker thread
+    win.go_to_image(1)                                              # the window still works
+    slow_sam.set()
+    assert _wait_until(qapp, lambda: win.tool_manager.current_tool is not None)
+    assert isinstance(win.tool_manager.current_tool, SamMasker2)
+    assert win.tool_manager.loading() is None and win.sidebar.sam.isChecked()
+
+
+def test_another_tool_chosen_while_sam_loads_wins(win, qapp, slow_sam):
+    from core.tools.manual_mask import ManualMask
+    win.sidebar.select_tool("sam")
+    win.sidebar.select_tool("manual_mask")
+    assert win.tool_manager.loading() is None
+    slow_sam.set()
+    _wait_until(qapp, lambda: False, timeout=0.3)
+    assert isinstance(win.tool_manager.current_tool, ManualMask)
+    assert win.sidebar.manual_mask.isChecked() and not win.sidebar.sam.isChecked()
+
+
+def test_sam_model_that_fails_to_load_unpresses_the_button(win, qapp, monkeypatch, no_popups):
+    import core.managers.tool_manager as tm
+    monkeypatch.setattr(tm, "ensure_model_available", lambda *a, **k: True)
+    monkeypatch.setattr(tm.sam_registry, "get_selected_variant",
+                        lambda: tm.sam_registry.SAM_VARIANTS["sam2_tiny"])
+
+    def broken(device, spec):
+        raise RuntimeError("checkpoint is damaged")
+    monkeypatch.setattr(tm, "load_predictor", broken)
+    win.sidebar.select_tool("sam")
+    assert _wait_until(qapp, lambda: win.tool_manager.loading() is None)
+    assert win.tool_manager.current_tool is None and not win.sidebar.sam.isChecked()
+    assert any("checkpoint is damaged" in p[2] for p in no_popups)
 
 
 # ------------------------------------------------------------------ mouse wheel (as in Inkscape)

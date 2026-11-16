@@ -4,8 +4,6 @@ main window that keeps what belongs to its run (the inference process
 manager; the training thread, worker and monitor window) instead of
 storing it on the window.
 """
-from pathlib import Path
-
 from PyQt6.QtCore import QThread
 from PyQt6.QtWidgets import QMessageBox
 
@@ -116,7 +114,7 @@ class TrainingRun:
         self.worker.moveToThread(self.thread)
 
         self.monitor = TrainingMonitor()
-        self.monitor.results_csv = str(Path(settings.output_dir) / "results.csv")
+        self.monitor.set_run(settings)
         self.monitor.set_stop_callback(self.worker.stop)
         self.monitor.set_thread(self.thread)
 
@@ -155,11 +153,9 @@ class TrainingRun:
         monitor = self.monitor
         if monitor is None:
             return
-        monitor.append_log("✅ Training finished.")
-        monitor.stop_btn.setText("✅ Close")
-        monitor.stop_btn.clicked.disconnect()
-        monitor.stop_btn.clicked.connect(monitor.accept)
-        monitor.stop_btn.setEnabled(True)
+        # How it ended: finished, stopped by the user, or failed (the worker knows).
+        outcome = getattr(self.worker, "outcome", None) or "finished"
+        monitor.set_finished(outcome)
 
     def _cleanup(self):
         if self.monitor is not None:

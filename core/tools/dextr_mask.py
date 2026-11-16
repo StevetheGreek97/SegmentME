@@ -13,6 +13,27 @@ from services import model_store
 logger = get_logger(__name__)
 from DEXTR.networks.deeplab_resnet import resnet101
 from DEXTR.dataloaders.helpers import get_bbox, crop_from_bbox, fixed_resize, make_gt, cstm_normalize, crop2fullmask
+
+
+def load_dextr_model(device="cpu"):
+    """The DEXTR model, ready to use (seconds; no Qt objects, so it can run
+    on a worker thread)."""
+    device = torch.device(device if torch.cuda.is_available() else "cpu")
+    spec = model_store.MODELS["dextr"]
+    model_path = model_store.find_checkpoint(spec.checkpoint)
+    if model_path is None:
+        raise FileNotFoundError(
+            f"{spec.label} checkpoint ({spec.checkpoint}) is not installed. "
+            "Download it in Settings -> Models."
+        )
+    logger.info("Loading DEXTR model from %s (device=%s)", model_path, device)
+
+    model = resnet101(1, nInputChannels=4, classifier='psp').to(device)
+    model.load_state_dict(torch.load(str(model_path), map_location=device))
+    model.eval()
+    return model
+
+
 class DEXTRMasker(MaskTool):
     """
     A class for creating masks using Deep Extreme Cut (DEXTR).
@@ -20,7 +41,7 @@ class DEXTRMasker(MaskTool):
     label = "DEXTR"
     segments_on_e = True     # E runs DEXTR on a worker thread (see the image view)
 
-    def __init__(self, host, device: str = "cpu"):
+    def __init__(self, host, device: str = "cpu", model=None):
         """
         Initialize the DEXTRMasker.
 
@@ -31,8 +52,8 @@ class DEXTRMasker(MaskTool):
         super().__init__(host)
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
 
-        # Load the DEXTR model
-        self.model = self._load_dextr_model()
+        # The DEXTR model (ToolManager may have loaded it on a worker thread)
+        self.model = model if model is not None else self._load_dextr_model()
 
         # Interactive extreme points
         self.extreme_points = []
@@ -43,20 +64,7 @@ class DEXTRMasker(MaskTool):
 
     def _load_dextr_model(self):
         """Load the DEXTR model once."""
-        spec = model_store.MODELS["dextr"]
-        model_path = model_store.find_checkpoint(spec.checkpoint)
-        if model_path is None:
-            raise FileNotFoundError(
-                f"{spec.label} checkpoint ({spec.checkpoint}) is not installed. "
-                "Download it in Settings -> Models."
-            )
-        logger.info("Loading DEXTR model from %s (device=%s)", model_path, self.device)
-
-        model = resnet101(1, nInputChannels=4, classifier='psp').to(self.device)
-        model.load_state_dict(torch.load(str(model_path), map_location=self.device))
-        model.eval()
-
-        return model
+        return load_dextr_model(self.device)
 
     # -------------------------------------------------------------- input
     def left_click(self, point, ctrl=False):

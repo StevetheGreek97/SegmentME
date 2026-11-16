@@ -570,7 +570,8 @@ class ImageDisplay(QGraphicsView):
             self._missing_item = None
 
     def keyPressEvent(self, event):
-        if (self.image_missing or self.loading()) and event.key() in (Qt.Key.Key_S, Qt.Key.Key_E):
+        if (self.image_missing or self.loading()) and event.key() in (Qt.Key.Key_S, Qt.Key.Key_E,
+                                                                       Qt.Key.Key_F):
             return  # no image to draw on (yet)
         if self._edit_mode is not None and self._edit_mode.key_press(event):
             return
@@ -584,9 +585,16 @@ class ImageDisplay(QGraphicsView):
             if tool is not None and tool.segments_on_e:
                 self.segment_in_background(tool)   # seconds on a CPU: keep the window alive
 
-    # ---------- SAM / DEXTR on a worker thread (E): see segment_runner.py ----------
-    def segment_in_background(self, tool):
-        self._segmenter.run(tool)
+        if event.key() == Qt.Key.Key_F and not event.modifiers():
+            tool = self._current_tool()
+            if tool is not None and tool.finds_all:
+                diagnostics.action("Key F: find every object on %s",
+                                   self.parent.state_manager.current_image_name)
+                self.segment_in_background(tool, find_all=True)
+
+    # ---------- SAM / DEXTR on a worker thread (E, F): see segment_runner.py ----------
+    def segment_in_background(self, tool, find_all=False):
+        self._segmenter.run(tool, find_all=find_all)
 
     def segmenting(self) -> bool:
         """True while SAM or DEXTR runs in the background."""

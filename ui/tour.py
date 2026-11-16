@@ -119,8 +119,12 @@ GETTING_STARTED = [
          "• <b>Click</b> on the object (green point = this is the object).<br>"
          "• <b>Right-click</b> on anything that is not part of it (red point).<br>"
          "• Or hold <b>Ctrl</b> and drag a box around the object.<br><br>"
-         "Press <b>E</b> to work out the outline, then <b>S</b> to save it. The first "
-         "time, loading SAM takes a little while.",
+         "Press <b>E</b> to work out the outline, then <b>S</b> to save it.<br><br>"
+         "<b>Many objects at once:</b> drag a box (Ctrl) around an area, click a few "
+         "objects and right-click what you don't want, then press <b>F</b>: SAM outlines "
+         "every object in the box (F needs a box), "
+         "and <b>S</b> saves them all. The first time, loading "
+         "SAM takes a little while.",
          _sidebar("sam")),
     Step("DEXTR (key D)",
          "Click the <b>four outermost points</b> of the object: the top-most, "
@@ -266,14 +270,16 @@ TRAINING = [
          "SegmentME offers to do it for you when you start training.",
          menu("File")),
     Step("Start training",
-         "<b>Actions → Train Custom Model</b>. Choose the model size (the letter: "
-         "<b>n</b> is fastest, <b>x</b> most accurate but slow) and the number of epochs "
-         "(how many times it studies all images). The other settings can stay as "
-         "they are.<br><br>The first training needs the internet once, to download the "
-         "starting model.",
+         "<b>Actions → Train Custom Model</b>. The top shows what it will learn from. "
+         "Choose the model size (<b>Nano</b> is fastest, <b>Extra large</b> most accurate "
+         "but slow) and how many epochs (times it studies all images). <b>Start from</b> "
+         "continues from a model you trained before. The other settings can stay as "
+         "they are; SegmentME remembers your choices.<br><br>The first training needs "
+         "the internet once, to download the starting model.",
          menu("Actions")),
     Step("While it trains",
-         "The Training Monitor shows the progress and the curves. On an ordinary "
+         "The Training Monitor shows the epoch, the time left, the best score so far "
+         "and the curves. On an ordinary "
          "computer without a graphics card this can take hours. Leave it running.<br><br>"
          "<b>Stop</b> ends it early. The best model so far is kept."),
     Step("Use your model",

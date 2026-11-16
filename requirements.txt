@@ -8,7 +8,7 @@ Pillow==11.2.1
 psutil==7.0.0
 PyYAML==6.0.2
 shapely==2.1.0
-ultralytics==8.3.167
+ultralytics==8.4.202  # 8.4: cls_pw (class balance) in training
 # SAM2 — installed separately in Dockerfile from GitHub
 # SAM3 — installed separately (git+https://github.com/facebookresearch/sam3.git + einops + pycocotools);
 #        checkpoint sam2_configs/sam3.pt is gated on https://huggingface.co/facebook/sam3

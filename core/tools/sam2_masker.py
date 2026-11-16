@@ -1,3 +1,4 @@
+import threading
 import time
 import weakref
 
@@ -8,11 +9,19 @@ from PyQt6.QtCore import QPointF, QRectF, Qt
 from sam2.sam2_image_predictor import SAM2ImagePredictor
 import torch
 import cv2
+from core.tools import sam_everything
 from core.tools.base import MaskTool
 from core.tools.sam2_loader import load_sam2_model
 from services.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def load_predictor(device, variant):
+    """The SAM2-family model for `variant`, ready to use (seconds; touches
+    no Qt objects, so it can run on a worker thread)."""
+    device = torch.device(device if torch.cuda.is_available() else "cpu")
+    return SAM2ImagePredictor(load_sam2_model(device, variant))
 
 
 class SamMasker2(MaskTool):
@@ -23,6 +32,11 @@ class SamMasker2(MaskTool):
     * left click        — positive (foreground) point
     * right click       — negative (background) point
     * Ctrl + left drag  — bounding box
+    * E                 — the one object the prompts point at
+    * F                 — every object inside the box (a box is needed;
+                          core/tools/sam_everything.py): green points are always included, objects under a red
+                          point are left out; right-click a result to drop it,
+                          S saves them all
 
     SAM resizes whatever it is given to a fixed square (1024 x 1024 for SAM2),
     so on a large scan objects shrink ~10x and the masks come out coarse. The
@@ -31,6 +45,7 @@ class SamMasker2(MaskTool):
     """
     label = "SAM"
     segments_on_e = True     # E runs SAM on a worker thread (see the image view)
+    finds_all = True         # F: every object in the box, also on a worker thread
 
     # Side of the window SAM looks at, in image pixels: SAM2's input size, so
     # a window this big is segmented at the image's own resolution.
@@ -39,7 +54,7 @@ class SamMasker2(MaskTool):
     # object bigger than the window); after that the result is used as is.
     MAX_WINDOW_GROWTH = 3
 
-    def __init__(self, host, device: str = "cpu", variant=None):
+    def __init__(self, host, device: str = "cpu", variant=None, predictor=None):
         """
         Initialize the Sam2 class.
 
@@ -48,13 +63,15 @@ class SamMasker2(MaskTool):
             device (str): Device to run the model on ('cpu' or 'cuda').
             variant: Optional sam_registry.SamVariant choosing which
                 SAM2-family checkpoint to load (default: SAM2 Tiny).
+            predictor: the model, already loaded (ToolManager loads it on a
+                worker thread, see load_predictor); None loads it here.
         """
         super().__init__(host)
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
         self.variant = variant
 
-        # Load the segmentation model (subclasses override _load_model)
-        self.predictor = self._load_model()
+        # The segmentation model (subclasses override _load_model)
+        self.predictor = predictor if predictor is not None else self._load_model()
 
         # Interactive points and items
         self.foreground_points = []
@@ -78,6 +95,12 @@ class SamMasker2(MaskTool):
         self._embedded_window = None  # (x0, y0, x1, y1)
         self._object_window_side = None  # window side the current object needed
 
+        # F: objects found in the box (outlines + their items on the scene)
+        self.found = []
+        self.found_items = []
+        self._stop = threading.Event()   # set to stop a search that is running
+        self._progress = None            # (done, total) of the running search
+
     # -------------------------------------------------------------- input
     def left_click(self, point, ctrl=False):
         if ctrl:                                  # Ctrl + left drag: box prompt
@@ -87,6 +110,8 @@ class SamMasker2(MaskTool):
             self.add_point(point, 1)
 
     def right_click(self, point):
+        # On a found object: drop it (the red point keeps it out of the next F too)
+        self.drop_found_at(point)
         self.add_point(point, 0)
 
     def mouse_move(self, point):
@@ -101,9 +126,126 @@ class SamMasker2(MaskTool):
     def current_polygon(self):
         return self.mask
 
+    # ------------------------------------------------- F: everything in the box
+    def find_all_job(self):
+        """The prompts for F as arguments for compute_all; None without a box
+        (F only searches inside a box the user drew)."""
+        if self.box is None:
+            logger.info("Find all: no box drawn; nothing to search")
+            return None
+        existing = []
+        get_existing = getattr(self.host, "existing_polygons", None)
+        if get_existing is not None:
+            try:
+                existing = get_existing()
+            except Exception:
+                logger.exception("Find all: could not read the saved masks; finding everything")
+        self._stop = threading.Event()
+        self._progress = None
+        min_scale = None                 # how far SAM may shrink the image: from the
+        get_sizes = getattr(self.host, "typical_object_sizes", None)   # objects saved so far
+        if get_sizes is not None:
+            try:
+                min_scale = sam_everything.min_scale_for(get_sizes())
+            except Exception:
+                logger.exception("Find all: could not read the object sizes; using the default")
+        return (self.box.copy(), list(self.foreground_points), list(self.background_points),
+                existing, self._stop, min_scale)
+
+    def compute_all(self, image, box, positives, negatives, existing, stop, min_scale=None):
+        """The model part of F (worker thread, no Qt objects): the outlines found."""
+        # The search embeds its own crop: the window held for E is gone.
+        self._embedded_image = None
+        self._embedded_window = None
+
+        def progress(done, total):
+            self._progress = (done, total)
+
+        return sam_everything.find_objects(self.predictor, image, box, positives, negatives,
+                                           existing, progress=progress, cancelled=stop.is_set,
+                                           min_scale=min_scale)
+
+    def progress_text(self):
+        """For the status bar while F runs."""
+        if self._progress is None:
+            return "looking at the area"
+        done, total = self._progress
+        return f"{100 * done // max(total, 1)}%"
+
+    def apply_all(self, polygons):
+        """Show what F found (GUI thread). Returns the message for the status bar."""
+        self.clear_found()
+        if self.current_polygon_item:                # E's outline would be saved instead
+            self.scene.removeItem(self.current_polygon_item)
+            self.current_polygon_item = None
+        self.mask = None
+        for polygon in polygons:
+            self._add_found(np.asarray(polygon, dtype=np.float32))
+        logger.info("Find all: showing %d object(s)", len(self.found))
+        return self.found_message()
+
+    def found_message(self):
+        if not self.found:
+            return "SAM found no new objects here"
+        return (f"SAM found {len(self.found)} object(s): S saves them all, "
+                "right-click one to leave it out")
+
+    def _add_found(self, polygon):
+        item = QGraphicsPolygonItem(QPolygonF([QPointF(float(x), float(y)) for x, y in polygon]))
+        pen = QPen(QColor(0, 255, 0), 2)
+        pen.setCosmetic(True)
+        item.setPen(pen)
+        item.setBrush(QColor(0, 255, 0, 50))
+        item.setZValue(15)
+        self.scene.addItem(item)
+        self.found.append(polygon)
+        self.found_items.append(item)
+
+    def drop_found_at(self, point) -> bool:
+        """Leave out the found object(s) under `point`."""
+        x, y = float(point[0]), float(point[1])
+        dropped = False
+        for i in reversed(range(len(self.found))):
+            contour = self.found[i].reshape(-1, 1, 2)
+            if cv2.pointPolygonTest(contour, (x, y), False) >= 0:
+                self.scene.removeItem(self.found_items[i])
+                del self.found[i], self.found_items[i]
+                dropped = True
+        if dropped:
+            logger.debug("Find all: dropped object at %s, %d left", point, len(self.found))
+        return dropped
+
+    def clear_found(self):
+        for item in self.found_items:
+            self.scene.removeItem(item)
+        self.found_items.clear()
+        self.found.clear()
+
+    def complete_mask(self):
+        """S: after F, save every object found (one class, one step);
+        otherwise the outline E made."""
+        if not self.found:
+            return super().complete_mask()
+        class_name = self.host.choose_class()
+        if class_name is None:
+            return                     # keep the results: the user can pick a class and press S again
+        image_name = self.host.image_name()
+        polygons = list(self.found)
+        save_many = getattr(self.host, "save_masks", None)
+        if save_many is not None:
+            save_many(polygons, image_name, class_name)
+        else:
+            for polygon in polygons:
+                self.host.save_mask(polygon, image_name, class_name)
+        logger.info("Saved %d SAM object(s) for image %s as class %r",
+                    len(polygons), image_name, class_name)
+        for polygon in polygons:
+            self.mask_added.emit(image_name, polygon)
+        self.clear_temp_items()
+
     def _load_model(self):
         """Load the SAM 2 model once."""
-        return SAM2ImagePredictor(load_sam2_model(self.device, self.variant))
+        return load_predictor(self.device, self.variant)
 
     def _add_graphics_point(self, point: tuple, label: int):
         """Helper function to add a point to the scene."""
@@ -259,6 +401,7 @@ class SamMasker2(MaskTool):
 
     def apply_polygon(self, polygon, side):
         """Show the result (GUI thread)."""
+        self.clear_found()            # E's one object replaces what F found
         self._object_window_side = side
         self.display_polygon(polygon)
         self.mask = np.array(polygon, dtype=np.float32)
@@ -366,4 +509,6 @@ class SamMasker2(MaskTool):
 
         self.mask = None
         self._object_window_side = None  # the next object starts with a fresh window size
+        self._stop.set()                 # a search still running is not wanted any more
+        self.clear_found()
         logger.debug("Cleared temporary items")
